@@ -1,5 +1,7 @@
 # SignalCourt Design
 
+Chinese version: [2026-10-05-signalcourt-design.zh-CN.md](2026-10-05-signalcourt-design.zh-CN.md)
+
 ## Product Summary
 
 SignalCourt is an evidence-first crypto news review agent for people who see a
