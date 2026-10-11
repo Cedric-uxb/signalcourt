@@ -1,8 +1,10 @@
 import { buildApp } from "./app.js";
+import { readConfig } from "./config.js";
 
-const app = buildApp();
+const config = readConfig(process.env);
+const app = buildApp({ config });
 
 await app.listen({
   host: "127.0.0.1",
-  port: Number(process.env.PORT ?? 8787)
+  port: config.PORT,
 });
