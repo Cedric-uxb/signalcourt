@@ -46,6 +46,14 @@ it("creates a replayable supported simulated decision receipt offline", async ()
     identical: true,
   });
   expect(JSON.stringify(receipt)).toContain("Demo/Simulated");
+  expect(receipt.evidence.filter(({ kind }) => kind === "ryo").map(({ payload }) =>
+    (payload as { availability: unknown }).availability
+  )).toEqual([
+    { market: "available" },
+    { market: "available", technicals: "available" },
+    { primary: "available" },
+    { sentiment: "available" },
+  ]);
 });
 
 it("creates an offline insufficient-evidence receipt without claiming live data", async () => {
@@ -62,6 +70,24 @@ it("creates an offline insufficient-evidence receipt without claiming live data"
   ]);
   expect(receipt.evidence.every(({ dataMode }) => dataMode !== "live")).toBe(true);
   expect(replayReceipt(receipt).identical).toBe(true);
+});
+
+it("replay detects news changed to the article publisher even with fresh hashes", async () => {
+  const receipt = await createAnalysisPipeline(
+    createDemoDependencies("supported"),
+  ).run(input);
+  const tampered = structuredClone(receipt);
+  const news = tampered.evidence.find(({ id }) => id === "news-1")!;
+  news.source = "https://www.example.com/other";
+  if (typeof news.payload === "object" && news.payload !== null) {
+    (news.payload as { url: string }).url = news.source;
+  }
+  const { hash: _hash, ...partial } = news;
+  news.hash = sha256(partial);
+  tampered.replay.evidenceHash = sha256(tampered.evidence);
+
+  expect(receiptSchema.safeParse(tampered).success).toBe(true);
+  expect(replayReceipt(tampered).identical).toBe(false);
 });
 
 it.each([

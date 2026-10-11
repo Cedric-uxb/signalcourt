@@ -3,7 +3,9 @@ import { expect, it, vi } from "vitest";
 import { receiptSchema, type Argument } from "../../shared/contracts.js";
 import { sha256 } from "../domain/canonical-json.js";
 import {
+  canonicalizeSourceUrl,
   createAnalysisPipeline,
+  publisherKey,
   replayReceipt,
   type AnalysisDependencies,
   type ClaimVerification,
@@ -20,6 +22,9 @@ function ryoArguments(tool: string): Record<string, unknown> {
 }
 
 function ryoResult(tool: string): RyoResult {
+  const availability = tool === "analyze_token"
+    ? { market: "available", technicals: "ok" }
+    : { data: "available" };
   return {
     tool,
     status: "ok",
@@ -29,7 +34,7 @@ function ryoResult(tool: string): RyoResult {
     data: tool === "analyze_token"
       ? { market: { price_usd: 100 }, technicals: { atr_14: 5 } }
       : { available: true },
-    availability: { source: "fixture" },
+    availability,
     summary: `${tool} available`,
     warnings: [],
   };
@@ -96,6 +101,70 @@ const rawInput = {
   token: "SOL",
   riskLevel: "balanced",
 } as const;
+
+it("canonicalizes source URLs before comparing publishers", () => {
+  expect(canonicalizeSourceUrl(
+    "HTTPS://ExAmPle.com:443/a/../news?utm_source=x&b=2&gclid=y&a=1#section",
+  )).toBe("https://example.com/news?a=1&b=2");
+  expect(publisherKey("https://www.news.Example.com/story")).toBe("example.com");
+  expect(publisherKey("https://192.0.2.10/story")).toBe("192.0.2.10");
+});
+
+it.each([
+  ["the exact article URL", "https://example.com/news"],
+  [
+    "an article URL with tracking and a fragment",
+    "https://EXAMPLE.com:443/news?utm_source=feed&fbclid=abc#section",
+  ],
+  ["a www host from the same publisher", "https://www.example.com/other"],
+  ["a subdomain from the same base publisher", "https://press.example.com/other"],
+])("filters %s before claim verification", async (_name, url) => {
+  const verifyClaims = vi.fn(async () => [verification("claim-1")]);
+  const dependencies = makeDependencies({
+    newsSearcher: vi.fn(async () => [{
+      title: "Not independent",
+      url,
+      excerpt: "This source is not independent from the article.",
+    }]),
+    llm: { ...makeDependencies().llm, verifyClaims },
+  });
+
+  const receipt = await createAnalysisPipeline(dependencies).run(rawInput);
+
+  expect(receipt.verdict).toBe("NO_TRADE");
+  expect(receipt.reasonCodes).toContain("INSUFFICIENT_EVIDENCE");
+  expect(receipt.claims[0]).toMatchObject({
+    status: "unsupported",
+    evidenceIds: [],
+  });
+  expect(verifyClaims).not.toHaveBeenCalled();
+  expect(receipt.evidence.filter(({ kind }) => kind === "news")).toHaveLength(0);
+});
+
+it("keeps only the first news item from a duplicate publisher", async () => {
+  const verifyClaims = vi.fn(async () => [verification("claim-1")]);
+  const dependencies = makeDependencies({
+    newsSearcher: vi.fn(async () => [{
+      title: "First independent report",
+      url: "https://wire.example.org/first",
+      excerpt: "First report.",
+    }, {
+      title: "Second report from same publisher",
+      url: "https://www.example.org/second",
+      excerpt: "Duplicate publisher report.",
+    }]),
+    llm: { ...makeDependencies().llm, verifyClaims },
+  });
+
+  const receipt = await createAnalysisPipeline(dependencies).run(rawInput);
+
+  expect(receipt.verdict).toBe("LONG");
+  expect(receipt.evidence.filter(({ kind }) => kind === "news")).toHaveLength(1);
+  expect(verifyClaims).toHaveBeenCalledWith(
+    expect.any(Array),
+    [expect.objectContaining({ id: "news-1", title: "First independent report" })],
+  );
+});
 
 async function rejectionSnapshot(promise: Promise<unknown>) {
   try {
@@ -309,7 +378,7 @@ it.each([
   }
 });
 
-it.each(["simulated", "unknown"] as const)(
+it.each(["simulated", "mixed", "unknown"] as const)(
   "blocks %s RYO data in live evidence mode",
   async (dataMode) => {
     const dependencies = makeDependencies({
@@ -345,9 +414,112 @@ it("preserves validated RYO request, data, and availability provenance", async (
   expect(tokenEvidence?.payload).toEqual({
     request: { symbol: "SOL", endpoint: "fixture" },
     data: { market: { price_usd: 100 }, technicals: { atr_14: 5 } },
-    availability: { source: "fixture" },
+    availability: { market: "available", technicals: "ok" },
   });
   expect(receipt.verdict).toBe("LONG");
+});
+
+it.each([
+  ["market_overview", "request"],
+  ["market_overview", "availability"],
+  ["analyze_token", "request"],
+  ["analyze_token", "availability"],
+  ["deep_analysis", "request"],
+  ["deep_analysis", "availability"],
+  ["monitor_market_sentiment_shift", "request"],
+  ["monitor_market_sentiment_shift", "availability"],
+] as const)("fails closed when %s omits required %s provenance", async (
+  failedTool,
+  missingField,
+) => {
+  const dependencies = makeDependencies({
+    ryo: {
+      call: vi.fn(async (tool: string) => {
+        const result = ryoResult(tool);
+        if (tool !== failedTool) return result;
+        const invalid: Partial<RyoResult> = { ...result };
+        delete invalid[missingField];
+        return invalid as RyoResult;
+      }),
+    },
+  });
+
+  const receipt = await createAnalysisPipeline(dependencies).run(rawInput);
+  const failedEvidence = receipt.evidence.find(({ source }) => source === failedTool);
+
+  expect(receipt.verdict).toBe("NO_TRADE");
+  expect(receipt.reasonCodes).toContain("MARKET_DATA_UNAVAILABLE");
+  expect(failedEvidence).toMatchObject({
+    status: "unavailable",
+    dataMode: "unknown",
+    payload: {
+      request: ryoArguments(failedTool),
+      availability: { available: false },
+    },
+  });
+  expect(failedEvidence?.summary).toContain("Pipeline fallback");
+});
+
+it.each([
+  ["analyze_token", { symbol: "ETH" }],
+  ["monitor_market_sentiment_shift", { time_window: "1d" }],
+] as const)("fails closed for mismatched %s request provenance", async (failedTool, request) => {
+  const dependencies = makeDependencies({
+    ryo: {
+      call: vi.fn(async (tool: string) => tool === failedTool
+        ? { ...ryoResult(tool), request }
+        : ryoResult(tool)),
+    },
+  });
+
+  const receipt = await createAnalysisPipeline(dependencies).run(rawInput);
+
+  expect(receipt.verdict).toBe("NO_TRADE");
+  expect(receipt.reasonCodes).toContain("MARKET_DATA_UNAVAILABLE");
+  expect(receipt.evidence.find(({ source }) => source === failedTool))
+    .toMatchObject({ status: "unavailable", dataMode: "unknown" });
+});
+
+it.each([
+  ["empty object", {}],
+  ["false leaf", { market: false }],
+  ["unavailable leaf", { market: "unavailable" }],
+  ["unknown leaf", { market: "unknown" }],
+  ["null leaf", { market: null }],
+  ["array value", { market: ["available"] }],
+] as const)("blocks live RYO evidence with %s availability", async (_name, availability) => {
+  const dependencies = makeDependencies({
+    ryo: {
+      call: vi.fn(async (tool: string) => tool === "analyze_token"
+        ? { ...ryoResult(tool), availability }
+        : ryoResult(tool)),
+    },
+  });
+
+  const receipt = await createAnalysisPipeline(dependencies).run(rawInput);
+
+  expect(receipt.verdict).toBe("NO_TRADE");
+  expect(receipt.reasonCodes).toContain("MARKET_DATA_UNAVAILABLE");
+});
+
+it.each([
+  ["exactly 24 hours old", "2026-10-07T12:00:00.000Z", "LONG"],
+  ["24 hours and 1ms old", "2026-10-07T11:59:59.999Z", "NO_TRADE"],
+  ["exactly 5 minutes ahead", "2026-10-08T12:05:00.000Z", "LONG"],
+  ["5 minutes and 1ms ahead", "2026-10-08T12:05:00.001Z", "NO_TRADE"],
+] as const)("applies the RYO freshness boundary at %s", async (_name, asOf, verdict) => {
+  const dependencies = makeDependencies({
+    ryo: {
+      call: vi.fn(async (tool: string) => ({ ...ryoResult(tool), asOf })),
+    },
+  });
+
+  const receipt = await createAnalysisPipeline(dependencies).run(rawInput);
+
+  expect(receipt.verdict).toBe(verdict);
+  expect(receipt.reasonCodes.includes("MARKET_DATA_UNAVAILABLE"))
+    .toBe(verdict === "NO_TRADE");
+  expect(replayReceipt(receipt).identical).toBe(true);
 });
 
 it("starts all RYO requests concurrently while preserving evidence order", async () => {
