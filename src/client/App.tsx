@@ -1,5 +1,5 @@
 import { Activity, AlertTriangle, FlaskConical } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { AnalysisRequest, Receipt } from "../shared/contracts";
 import {
@@ -16,6 +16,7 @@ import { DecisionSummary } from "./components/DecisionSummary";
 import { EvidenceExplorer } from "./components/EvidenceExplorer";
 import { ReceiptPanel } from "./components/ReceiptPanel";
 import { WorkspaceTabs, type WorkspaceTab } from "./components/WorkspaceTabs";
+import { useMediaQuery } from "./useMediaQuery";
 
 type AppState =
   | { status: "idle" }
@@ -24,15 +25,19 @@ type AppState =
   | { status: "error"; message: string };
 
 type ReplayState =
-  | { status: "idle" | "loading" }
-  | { status: "success"; result: ReplayResult }
-  | { status: "error"; message: string };
+  | { status: "idle" }
+  | { status: "loading"; receiptId: string }
+  | { status: "success"; receiptId: string; result: ReplayResult }
+  | { status: "error"; receiptId: string; message: string };
 
 export function App() {
   const [state, setState] = useState<AppState>({ status: "idle" });
   const [system, setSystem] = useState<SystemStatus | null>(null);
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("decision");
   const [replayState, setReplayState] = useState<ReplayState>({ status: "idle" });
+  const isMobile = useMediaQuery("(max-width: 820px)");
+  const replayRequest = useRef(0);
+  const activeReceiptId = useRef<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -43,13 +48,17 @@ export function App() {
   }, []);
 
   async function analyze(input: AnalysisRequest) {
+    replayRequest.current += 1;
+    activeReceiptId.current = null;
     setState({ status: "loading" });
     setReplayState({ status: "idle" });
     try {
       const receipt = await createAnalysis(input);
+      activeReceiptId.current = receipt.id;
       setState({ status: "success", receipt });
       setActiveTab("decision");
     } catch (error) {
+      activeReceiptId.current = null;
       setState({
         status: "error",
         message: error instanceof Error ? error.message : "Analysis unavailable.",
@@ -61,15 +70,31 @@ export function App() {
 
   async function runReplay() {
     if (!receipt) return;
-    setReplayState({ status: "loading" });
+    const receiptId = receipt.id;
+    const requestId = ++replayRequest.current;
+    setReplayState({ status: "loading", receiptId });
     try {
-      setReplayState({ status: "success", result: await replayReceipt(receipt.id) });
+      const result = await replayReceipt(receiptId);
+      if (requestId !== replayRequest.current || activeReceiptId.current !== receiptId) return;
+      setReplayState({ status: "success", receiptId, result });
     } catch (error) {
+      if (requestId !== replayRequest.current || activeReceiptId.current !== receiptId) return;
       setReplayState({
         status: "error",
+        receiptId,
         message: error instanceof Error ? error.message : "Receipt replay unavailable.",
       });
     }
+  }
+
+  function mobilePanelProps(tab: WorkspaceTab) {
+    if (!isMobile) return {};
+    return {
+      id: `view-${tab}`,
+      role: "tabpanel" as const,
+      "aria-labelledby": `tab-${tab}`,
+      hidden: activeTab !== tab,
+    };
   }
 
   return (
@@ -94,19 +119,28 @@ export function App() {
       </div>
 
       <AnalysisForm loading={state.status === "loading"} onSubmit={analyze} />
-      {receipt && <WorkspaceTabs active={activeTab} onChange={setActiveTab} />}
+      {receipt && isMobile && <WorkspaceTabs active={activeTab} onChange={setActiveTab} />}
 
       <div className={`analysis-grid ${receipt ? "has-receipt" : "is-empty"}`}>
         <div className="primary-column">
           {receipt ? (
             <>
-              <div id="view-decision" role="tabpanel" aria-labelledby="tab-decision" className={`panel tab-decision ${activeTab === "decision" ? "is-active" : ""}`}>
+              <div
+                {...mobilePanelProps("decision")}
+                className={`panel tab-decision ${activeTab === "decision" ? "is-active" : ""}`}
+              >
                 <DecisionSummary {...receipt} />
               </div>
-              <div id="view-claims" role="tabpanel" aria-labelledby="tab-claims" className={`panel tab-claims ${activeTab === "claims" ? "is-active" : ""}`}>
+              <div
+                {...mobilePanelProps("claims")}
+                className={`panel tab-claims ${activeTab === "claims" ? "is-active" : ""}`}
+              >
                 <ClaimLedger claims={receipt.claims} />
               </div>
-              <div id="view-debate" role="tabpanel" aria-labelledby="tab-debate" className={`panel tab-debate ${activeTab === "debate" ? "is-active" : ""}`}>
+              <div
+                {...mobilePanelProps("debate")}
+                className={`panel tab-debate ${activeTab === "debate" ? "is-active" : ""}`}
+              >
                 <DebateTimeline arguments={receipt.arguments} />
               </div>
             </>
@@ -130,7 +164,10 @@ export function App() {
         <aside className="secondary-column" aria-label="Evidence and receipt">
           {receipt ? (
             <>
-              <div className={`panel tab-decision ${activeTab === "decision" ? "is-active" : ""}`}>
+              <div
+                className={`panel tab-decision ${activeTab === "decision" ? "is-active" : ""}`}
+                hidden={isMobile && activeTab !== "decision"}
+              >
                 <ReceiptPanel
                   receiptId={receipt.id}
                   createdAt={receipt.createdAt}
@@ -139,7 +176,10 @@ export function App() {
                   onReplay={runReplay}
                 />
               </div>
-              <div id="view-evidence" role="tabpanel" aria-labelledby="tab-evidence" className={`panel tab-evidence ${activeTab === "evidence" ? "is-active" : ""}`}>
+              <div
+                {...mobilePanelProps("evidence")}
+                className={`panel tab-evidence ${activeTab === "evidence" ? "is-active" : ""}`}
+              >
                 <EvidenceExplorer evidence={receipt.evidence} />
               </div>
             </>

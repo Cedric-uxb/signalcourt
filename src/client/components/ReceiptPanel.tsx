@@ -1,5 +1,5 @@
 import { CheckCheck, Copy, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import type { ReplayResult } from "../api";
 import { formatTimestamp } from "../formatters";
@@ -15,12 +15,17 @@ export function ReceiptPanel({
   createdAt: string;
   storedReplayIdentical: boolean;
   replayState:
-    | { status: "idle" | "loading" }
-    | { status: "success"; result: ReplayResult }
-    | { status: "error"; message: string };
+    | { status: "idle" }
+    | { status: "loading"; receiptId: string }
+    | { status: "success"; receiptId: string; result: ReplayResult }
+    | { status: "error"; receiptId: string; message: string };
   onReplay: () => Promise<void>;
 }) {
   const [copyMessage, setCopyMessage] = useState("");
+
+  useEffect(() => {
+    setCopyMessage("");
+  }, [receiptId]);
 
   async function copyId() {
     try {
@@ -32,15 +37,44 @@ export function ReceiptPanel({
     }
   }
 
-  const replayMessage = replayState.status === "success"
-    ? replayState.result.identical
-      ? "Replay matched stored decision"
-      : "Replay mismatch detected"
-    : replayState.status === "error"
-      ? replayState.message
-      : storedReplayIdentical
-        ? "Stored replay verified"
-        : "Stored replay mismatch";
+  const visibleReplayState = replayState.status !== "idle" && replayState.receiptId !== receiptId
+    ? { status: "idle" as const }
+    : replayState;
+  const replayView = visibleReplayState.status === "loading"
+    ? {
+        className: "is-loading",
+        icon: <RefreshCw aria-hidden="true" className="spin-icon" size={17} />,
+        message: "Replaying receipt",
+      }
+    : visibleReplayState.status === "error"
+      ? {
+          className: "is-error",
+          icon: <TriangleAlert aria-hidden="true" size={17} />,
+          message: visibleReplayState.message,
+        }
+      : visibleReplayState.status === "success" && !visibleReplayState.result.identical
+        ? {
+            className: "is-error",
+            icon: <TriangleAlert aria-hidden="true" size={17} />,
+            message: "Replay mismatch detected",
+          }
+        : visibleReplayState.status === "success"
+          ? {
+              className: "is-success",
+              icon: <CheckCheck aria-hidden="true" size={17} />,
+              message: "Replay matched stored decision",
+            }
+          : storedReplayIdentical
+            ? {
+                className: "is-success",
+                icon: <CheckCheck aria-hidden="true" size={17} />,
+                message: "Stored replay verified",
+              }
+            : {
+                className: "is-error",
+                icon: <TriangleAlert aria-hidden="true" size={17} />,
+                message: "Stored replay mismatch",
+              };
 
   return (
     <section className="receipt-panel" aria-labelledby="receipt-title">
@@ -59,20 +93,22 @@ export function ReceiptPanel({
       {copyMessage && <p className="copy-feedback" role="status">{copyMessage}</p>}
       <time dateTime={createdAt}>Created {formatTimestamp(createdAt)}</time>
 
-      <div className={`replay-result ${replayState.status === "error" ? "is-error" : ""}`} aria-live="polite">
-        {replayState.status === "success" && !replayState.result.identical
-          ? <TriangleAlert aria-hidden="true" size={17} />
-          : <CheckCheck aria-hidden="true" size={17} />}
-        <span>{replayMessage}</span>
+      <div
+        className={`replay-result ${replayView.className}`}
+        aria-live="polite"
+        role={replayView.className === "is-error" ? "alert" : undefined}
+      >
+        {replayView.icon}
+        <span>{replayView.message}</span>
       </div>
       <button
         className="secondary-button"
         type="button"
-        disabled={replayState.status === "loading"}
+        disabled={visibleReplayState.status === "loading"}
         onClick={() => void onReplay()}
       >
         <RefreshCw aria-hidden="true" size={17} />
-        {replayState.status === "loading" ? "Replaying..." : "Replay receipt"}
+        {visibleReplayState.status === "loading" ? "Replaying..." : "Replay receipt"}
       </button>
     </section>
   );

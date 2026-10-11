@@ -1,5 +1,5 @@
 import { SearchCheck } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import type { AnalysisRequest } from "../../shared/contracts";
 
@@ -30,6 +30,9 @@ export function AnalysisForm({
   const [token, setToken] = useState("SOL");
   const [riskLevel, setRiskLevel] = useState<AnalysisRequest["riskLevel"]>("balanced");
   const [errors, setErrors] = useState<FieldErrors>({});
+  const articleUrlRef = useRef<HTMLInputElement>(null);
+  const tokenRef = useRef<HTMLInputElement>(null);
+  const errorSummary = Object.values(errors).filter((message): message is string => Boolean(message));
 
   return (
     <form
@@ -39,13 +42,18 @@ export function AnalysisForm({
         event.preventDefault();
         const nextErrors = validate(articleUrl, token);
         setErrors(nextErrors);
-        if (Object.keys(nextErrors).length > 0) return;
+        if (Object.keys(nextErrors).length > 0) {
+          if (nextErrors.articleUrl) articleUrlRef.current?.focus();
+          else tokenRef.current?.focus();
+          return;
+        }
         void onSubmit({ articleUrl: articleUrl.trim(), token: token.trim().toUpperCase(), riskLevel });
       }}
     >
       <div className="field-group field-url">
         <label htmlFor="article-url">News URL</label>
         <input
+          ref={articleUrlRef}
           id="article-url"
           type="url"
           value={articleUrl}
@@ -64,6 +72,7 @@ export function AnalysisForm({
       <div className="field-group field-token">
         <label htmlFor="token-symbol">Token symbol</label>
         <input
+          ref={tokenRef}
           id="token-symbol"
           value={token}
           inputMode="text"
@@ -104,6 +113,12 @@ export function AnalysisForm({
         <SearchCheck aria-hidden="true" size={18} />
         {loading ? "Analyzing evidence..." : "Analyze evidence"}
       </button>
+
+      {errorSummary.length > 0 && (
+        <p className="form-error-summary" role="alert" aria-live="assertive">
+          {errorSummary.join(" ")}
+        </p>
+      )}
     </form>
   );
 }

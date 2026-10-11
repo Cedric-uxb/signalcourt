@@ -28,11 +28,24 @@ export type ReplayResult = z.infer<typeof replayResultSchema>;
 
 const errorMessages: Record<string, string> = {
   ANALYSIS_UNAVAILABLE: "Analysis service is temporarily unavailable. Try again.",
+  INVALID_INPUT: "Review the URL, token, and risk level, then try again.",
   INVALID_ANALYSIS_REQUEST: "Review the URL, token, and risk level, then try again.",
   INVALID_RECEIPT_ID: "This receipt identifier cannot be replayed.",
   RECEIPT_NOT_FOUND: "The stored receipt could not be found.",
   RECEIPT_UNAVAILABLE: "Receipt replay is temporarily unavailable. Try again.",
 };
+
+async function request(
+  input: RequestInfo | URL,
+  init: RequestInit,
+  networkMessage: string,
+): Promise<Response> {
+  try {
+    return await fetch(input, init);
+  } catch {
+    throw new Error(networkMessage);
+  }
+}
 
 async function responseError(response: Response, fallback: string): Promise<Error> {
   try {
@@ -57,23 +70,41 @@ async function parseResponse<T>(
 }
 
 export async function createAnalysis(input: AnalysisRequest): Promise<Receipt> {
-  const response = await fetch("/api/analyses", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
+  const response = await request(
+    "/api/analyses",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+    "Analysis request could not reach the service. Check your connection and try again.",
+  );
   return parseResponse(response, receiptSchema, "Analysis could not be completed.");
 }
 
 export async function getSystemStatus(): Promise<SystemStatus> {
-  const response = await fetch("/api/system", { headers: { Accept: "application/json" } });
+  const response = await request(
+    "/api/system",
+    { headers: { Accept: "application/json" } },
+    "System status could not reach the service.",
+  );
   return parseResponse(response, systemStatusSchema, "System status is unavailable.");
 }
 
 export async function replayReceipt(receiptId: string): Promise<ReplayResult> {
-  const response = await fetch(`/api/receipts/${encodeURIComponent(receiptId)}/replay`, {
-    method: "POST",
-    headers: { Accept: "application/json" },
-  });
-  return parseResponse(response, replayResultSchema, "Receipt replay could not be completed.");
+  const response = await request(
+    `/api/receipts/${encodeURIComponent(receiptId)}/replay`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json" },
+    },
+    "Receipt replay could not reach the service. Check your connection and try again.",
+  );
+  const result = await parseResponse(
+    response,
+    replayResultSchema,
+    "Receipt replay could not be completed.",
+  );
+  if (result.id !== receiptId) throw new Error("Receipt replay returned the wrong receipt.");
+  return result;
 }

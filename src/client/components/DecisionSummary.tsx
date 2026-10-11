@@ -24,7 +24,10 @@ export function DecisionSummary({
           <span className="section-kicker"><Scale aria-hidden="true" size={15} />Decision</span>
           <h2 id="decision-title"><VerdictIcon aria-hidden="true" size={26} />{verdict}</h2>
         </div>
-        <span className="confidence-value">{Math.round(confidence * 100)}% confidence</span>
+        <div className="score-summary">
+          <span className="confidence-value">{Math.round(confidence * 100)}% Model debate score</span>
+          <span className="score-note">This score is not an outcome probability.</span>
+        </div>
       </div>
       <p className="practice-callout">Practice decision only. Not a trade instruction.</p>
 
