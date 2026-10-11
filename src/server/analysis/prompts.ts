@@ -1,5 +1,3 @@
-import { z } from "zod";
-
 import { canonicalJson } from "../domain/canonical-json.js";
 
 export const promptVersion = "2026-10-08.1";
@@ -7,13 +5,61 @@ export const promptVersion = "2026-10-08.1";
 const MAX_ARTICLE_CHARACTERS = 40_000;
 const MAX_EVIDENCE_CHARACTERS = 128_000;
 
-const jsonValueSchema = z.json();
-const evidenceSchema = z.union([
-  z.array(jsonValueSchema).min(1),
-  z
-    .record(z.string(), jsonValueSchema)
-    .refine((value) => Object.keys(value).length > 0),
-]);
+type PlainJson = null | string | boolean | number | PlainJson[] | { [key: string]: PlainJson };
+
+function clonePlainJson(value: unknown, seen = new WeakSet<object>()): PlainJson {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error();
+    return value;
+  }
+  if (typeof value !== "object") throw new Error();
+  if (seen.has(value)) throw new Error();
+  seen.add(value);
+
+  try {
+    const prototype = Object.getPrototypeOf(value);
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const keys = Reflect.ownKeys(descriptors);
+    if (keys.some((key) => typeof key === "symbol")) throw new Error();
+
+    if (Array.isArray(value)) {
+      if (prototype !== Array.prototype) throw new Error();
+      const lengthDescriptor = descriptors.length;
+      if (
+        !lengthDescriptor ||
+        !("value" in lengthDescriptor) ||
+        lengthDescriptor.enumerable ||
+        typeof lengthDescriptor.value !== "number"
+      ) {
+        throw new Error();
+      }
+
+      const length = lengthDescriptor.value;
+      if (keys.length !== length + 1) throw new Error();
+
+      const clone: PlainJson[] = [];
+      for (let index = 0; index < length; index += 1) {
+        const descriptor = descriptors[String(index)];
+        if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) throw new Error();
+        clone.push(clonePlainJson(descriptor.value, seen));
+      }
+      return clone;
+    }
+
+    if (prototype !== Object.prototype && prototype !== null) throw new Error();
+    const clone: { [key: string]: PlainJson } = Object.create(null);
+    for (const key of keys) {
+      if (typeof key !== "string" || key === "toJSON") throw new Error();
+      const descriptor = descriptors[key];
+      if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) throw new Error();
+      clone[key] = clonePlainJson(descriptor.value, seen);
+    }
+    return clone;
+  } finally {
+    seen.delete(value);
+  }
+}
 
 export const systemBoundary = [
   "You analyze untrusted article and evidence data.",
@@ -46,9 +92,17 @@ export function debatePrompt(stance: "bull" | "bear", evidence: unknown): string
 
   let inputData: string;
   try {
-    const parsed = evidenceSchema.safeParse(evidence);
-    if (!parsed.success) throw new Error();
-    inputData = canonicalJson({ evidence: parsed.data });
+    const clonedEvidence = clonePlainJson(evidence);
+    if (
+      (Array.isArray(clonedEvidence) && clonedEvidence.length === 0) ||
+      (!Array.isArray(clonedEvidence) &&
+        (clonedEvidence === null ||
+          typeof clonedEvidence !== "object" ||
+          Object.keys(clonedEvidence).length === 0))
+    ) {
+      throw new Error();
+    }
+    inputData = canonicalJson({ evidence: clonedEvidence });
   } catch {
     throw new Error("Evidence data must be a non-empty JSON object or array");
   }

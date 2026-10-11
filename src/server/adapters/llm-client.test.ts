@@ -35,6 +35,84 @@ function invalidEvidenceCases(): Array<{ name: string; value: unknown }> {
   ];
 }
 
+type DynamicEvidenceCase = {
+  name: string;
+  create: () => { value: unknown; dynamicCode?: ReturnType<typeof vi.fn> };
+};
+
+function dynamicEvidenceCases(): DynamicEvidenceCase[] {
+  return [
+    {
+      name: "enumerable getter",
+      create: () => {
+        const getter = vi.fn(() => "dynamic");
+        const value: Record<string, unknown> = { id: "ev-1" };
+        Object.defineProperty(value, "dynamic", { enumerable: true, get: getter });
+        return { value, dynamicCode: getter };
+      },
+    },
+    {
+      name: "non-enumerable own toJSON",
+      create: () => {
+        const toJSON = vi.fn(() => ({ transformed: true }));
+        const value: Record<string, unknown> = { id: "ev-1" };
+        Object.defineProperty(value, "toJSON", { value: toJSON, enumerable: false });
+        return { value, dynamicCode: toJSON };
+      },
+    },
+    {
+      name: "prototype toJSON",
+      create: () => {
+        const toJSON = vi.fn(() => ({ transformed: true }));
+        const value = Object.assign(Object.create({ toJSON }), { id: "ev-1" });
+        return { value, dynamicCode: toJSON };
+      },
+    },
+    {
+      name: "custom class",
+      create: () => {
+        class EvidenceRecord {
+          id = "ev-1";
+        }
+        return { value: new EvidenceRecord() };
+      },
+    },
+    {
+      name: "symbol key",
+      create: () => ({ value: { id: "ev-1", [Symbol("hidden")]: "dynamic" } }),
+    },
+    {
+      name: "hidden non-enumerable property",
+      create: () => {
+        const value: Record<string, unknown> = { id: "ev-1" };
+        Object.defineProperty(value, "hidden", { value: "dynamic", enumerable: false });
+        return { value };
+      },
+    },
+    {
+      name: "sparse array",
+      create: () => ({ value: new Array(1) }),
+    },
+    {
+      name: "array extra property",
+      create: () => {
+        const value = evidenceFixture() as Array<unknown> & { extra?: string };
+        value.extra = "dynamic";
+        return { value };
+      },
+    },
+    {
+      name: "array accessor index",
+      create: () => {
+        const getter = vi.fn(() => ({ id: "ev-1" }));
+        const value = new Array(1);
+        Object.defineProperty(value, "0", { enumerable: true, get: getter });
+        return { value, dynamicCode: getter };
+      },
+    },
+  ];
+}
+
 function completionResponse(
   output: unknown,
   options: { envelopeExtra?: Record<string, unknown>; messageExtra?: Record<string, unknown> } = {},
@@ -157,15 +235,13 @@ describe("prompt boundaries", () => {
     );
   });
 
-  it("does not execute a non-enumerable custom toJSON method", () => {
-    const toJSON = vi.fn(() => ({ transformed: true }));
-    const evidence: Record<string, unknown> = { id: "ev-1" };
-    Object.defineProperty(evidence, "toJSON", { value: toJSON, enumerable: false });
+  it.each(dynamicEvidenceCases())("rejects $name without executing dynamic code", ({ create }) => {
+    const { value, dynamicCode } = create();
 
-    const prompt = debatePrompt("bull", evidence);
-
-    expect(toJSON).not.toHaveBeenCalled();
-    expect(prompt).toContain('{"evidence":{"id":"ev-1"}}');
+    expect(() => debatePrompt("bull", value)).toThrow(
+      "Evidence data must be a non-empty JSON object or array",
+    );
+    if (dynamicCode) expect(dynamicCode).not.toHaveBeenCalled();
   });
 
   it("rejects an enumerable custom toJSON function without executing it", () => {
@@ -182,6 +258,43 @@ describe("prompt boundaries", () => {
     const second = { a: { b: 3, y: 2 }, z: 1 };
 
     expect(debatePrompt("bear", first)).toBe(debatePrompt("bear", second));
+  });
+
+  it("rejects an incrementing getter before it can produce any prompt", () => {
+    let invocationCount = 0;
+    const evidence: Record<string, unknown> = { id: "ev-1" };
+    Object.defineProperty(evidence, "sequence", {
+      enumerable: true,
+      get() {
+        invocationCount += 1;
+        return invocationCount;
+      },
+    });
+
+    expect(() => debatePrompt("bull", evidence)).toThrow(
+      "Evidence data must be a non-empty JSON object or array",
+    );
+    expect(() => debatePrompt("bull", evidence)).toThrow(
+      "Evidence data must be a non-empty JSON object or array",
+    );
+    expect(invocationCount).toBe(0);
+  });
+
+  it("accepts frozen plain evidence deterministically", () => {
+    const frozen = Object.freeze({ z: 1, a: Object.freeze({ y: 2, b: 3 }) });
+    const plain = { a: { b: 3, y: 2 }, z: 1 };
+
+    expect(debatePrompt("bull", frozen)).toBe(debatePrompt("bull", plain));
+  });
+
+  it("accepts a non-empty null-prototype object deterministically", () => {
+    const evidence = Object.create(null) as Record<string, unknown>;
+    evidence.z = 1;
+    evidence.a = { y: 2, b: 3 };
+
+    expect(debatePrompt("bear", evidence)).toBe(
+      debatePrompt("bear", { a: { b: 3, y: 2 }, z: 1 }),
+    );
   });
 
   it("rejects unsupported debate stances", () => {
@@ -462,6 +575,20 @@ describe("structured debate outputs", () => {
     expect(toJSON).not.toHaveBeenCalled();
     expect(fetchImpl).not.toHaveBeenCalled();
   });
+
+  it.each(dynamicEvidenceCases())(
+    "rejects $name evidence before transport without executing dynamic code",
+    async ({ create }) => {
+      const { value, dynamicCode } = create();
+      const fetchImpl = fetchReturning(completionResponse({}));
+
+      await expect(clientWith(fetchImpl).argue("bull", value)).rejects.toThrow(
+        "LLM evidence must be a non-empty JSON object or array",
+      );
+      if (dynamicCode) expect(dynamicCode).not.toHaveBeenCalled();
+      expect(fetchImpl).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("LLM response failures", () => {
