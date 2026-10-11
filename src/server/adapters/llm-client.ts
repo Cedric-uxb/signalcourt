@@ -6,6 +6,7 @@ import {
   debatePrompt,
   promptVersion,
   systemBoundary,
+  verificationPrompt,
 } from "../analysis/prompts.js";
 
 const MAX_RESPONSE_BYTES = 512 * 1024;
@@ -24,6 +25,47 @@ const claimsOutputSchema = z
       .max(3)
       .refine((claims) => new Set(claims.map(({ id }) => id)).size === claims.length),
   })
+  .strict();
+
+const verificationNewsSchema = z
+  .object({
+    id: z.string().trim().min(1).max(128),
+    title: z.string().trim().min(1).max(1_000),
+    url: z.string().trim().pipe(z.url({ protocol: /^https?$/ })),
+    excerpt: z.string().trim().min(1).max(5_000),
+  })
+  .strict();
+
+const verificationInputClaimsSchema = z
+  .array(claimSchema)
+  .min(1)
+  .max(3)
+  .refine((claims) => new Set(claims.map(({ id }) => id)).size === claims.length);
+
+const verificationInputNewsSchema = z
+  .array(verificationNewsSchema)
+  .min(1)
+  .max(5)
+  .refine((news) => new Set(news.map(({ id }) => id)).size === news.length);
+
+const verificationSchema = z
+  .object({
+    claimId: z.string().trim().min(1).max(64),
+    status: z.enum(["verified", "disputed", "unsupported"]),
+    evidenceIds: z
+      .array(z.string().trim().min(1).max(128))
+      .max(5)
+      .refine((ids) => new Set(ids).size === ids.length),
+    explanation: z.string().trim().min(1).max(1_000),
+  })
+  .strict()
+  .refine(
+    ({ status, evidenceIds }) =>
+      status === "unsupported" || evidenceIds.length > 0,
+  );
+
+const verificationsOutputSchema = z
+  .object({ verifications: z.array(verificationSchema).max(3) })
   .strict();
 
 const citationsSchema = z
@@ -226,6 +268,44 @@ export function createLlmClient({ baseUrl, apiKey, model, fetchImpl = fetch }: O
       const parsed = claimsOutputSchema.safeParse(output);
       if (!parsed.success) throw new Error("LLM response content schema is invalid");
       return parsed.data.claims;
+    },
+
+    async verifyClaims(
+      claims: Array<{ id: string; text: string }>,
+      news: Array<{ id: string; title: string; url: string; excerpt: string }>,
+    ) {
+      const parsedClaims = verificationInputClaimsSchema.safeParse(claims);
+      const parsedNews = verificationInputNewsSchema.safeParse(news);
+      if (!parsedClaims.success || !parsedNews.success) {
+        throw new Error("LLM verification input schema is invalid");
+      }
+
+      let userPrompt: string;
+      try {
+        userPrompt = verificationPrompt(parsedClaims.data, parsedNews.data);
+      } catch {
+        throw new Error("LLM verification input schema is invalid");
+      }
+
+      const output = await complete(userPrompt);
+      const parsed = verificationsOutputSchema.safeParse(output);
+      if (!parsed.success) throw new Error("LLM response content schema is invalid");
+
+      const claimIds = new Set(parsedClaims.data.map(({ id }) => id));
+      const newsIds = new Set(parsedNews.data.map(({ id }) => id));
+      const returnedClaimIds = parsed.data.verifications.map(({ claimId }) => claimId);
+      const coversEveryClaim =
+        returnedClaimIds.length === claimIds.size &&
+        new Set(returnedClaimIds).size === returnedClaimIds.length &&
+        returnedClaimIds.every((id) => claimIds.has(id));
+      const citationsExist = parsed.data.verifications.every(({ evidenceIds }) =>
+        evidenceIds.every((id) => newsIds.has(id))
+      );
+      if (!coversEveryClaim || !citationsExist) {
+        throw new Error("LLM response content schema is invalid");
+      }
+
+      return parsed.data.verifications;
     },
 
     async argue(stance: "bull" | "bear", evidence: unknown) {

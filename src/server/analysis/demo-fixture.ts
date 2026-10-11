@@ -8,7 +8,9 @@ const ryoResults: Record<string, RyoResult> = {
     status: "ok",
     dataMode: "simulated",
     asOf: FIXED_TIME,
+    request: {},
     data: { regime: "neutral", fixture: "Demo/Simulated" },
+    availability: { source: "Demo/Simulated fixture" },
     summary: "Demo/Simulated market regime is neutral.",
     warnings: [],
   },
@@ -17,11 +19,13 @@ const ryoResults: Record<string, RyoResult> = {
     status: "ok",
     dataMode: "simulated",
     asOf: FIXED_TIME,
+    request: { symbol: "SOL" },
     data: {
       market: { price_usd: 100 },
       technicals: { atr_14: 5 },
       fixture: "Demo/Simulated",
     },
+    availability: { source: "Demo/Simulated fixture" },
     summary: "Demo/Simulated SOL data has balanced momentum.",
     warnings: [],
   },
@@ -30,11 +34,13 @@ const ryoResults: Record<string, RyoResult> = {
     status: "partial",
     dataMode: "simulated",
     asOf: FIXED_TIME,
+    request: { symbol: "SOL", include_perp: true },
     data: {
       catalysts: ["simulated filing confirmation"],
       risks: ["simulated catalyst may be priced in"],
       fixture: "Demo/Simulated",
     },
+    availability: { source: "Demo/Simulated fixture" },
     summary: "Demo/Simulated evidence is mixed.",
     warnings: ["Derivatives are unavailable in this simulated fixture."],
   },
@@ -43,7 +49,9 @@ const ryoResults: Record<string, RyoResult> = {
     status: "ok",
     dataMode: "simulated",
     asOf: FIXED_TIME,
+    request: { time_window: "7d" },
     data: { direction: "improving", fixture: "Demo/Simulated" },
+    availability: { source: "Demo/Simulated fixture" },
     summary: "Demo/Simulated sentiment is improving.",
     warnings: [],
   },
@@ -80,6 +88,19 @@ export function createDemoDependencies(
         id: "claim-1",
         text: "A Demo/Simulated regulated market filing was submitted.",
       }],
+      verifyClaims: async (claims) => claims.map(({ id }) => mode === "supported"
+        ? {
+            claimId: id,
+            status: "verified" as const,
+            evidenceIds: ["news-1"],
+            explanation: "Demo/Simulated independent news supports this claim.",
+          }
+        : {
+            claimId: id,
+            status: "unsupported" as const,
+            evidenceIds: [],
+            explanation: "Demo/Simulated mode has no independent news support.",
+          }),
       argue: async (stance) => stance === "bull"
         ? {
             stance,
