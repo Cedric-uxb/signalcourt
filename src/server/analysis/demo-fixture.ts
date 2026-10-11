@@ -40,9 +40,9 @@ const ryoResults: Record<string, RyoResult> = {
       risks: ["simulated catalyst may be priced in"],
       fixture: "Demo/Simulated",
     },
-    availability: { primary: "available" },
+    availability: { primary: "available", derivatives: "available" },
     summary: "Demo/Simulated evidence is mixed.",
-    warnings: ["Derivatives are unavailable in this simulated fixture."],
+    warnings: ["Demo/Simulated derivatives are not live market data."],
   },
   monitor_market_sentiment_shift: {
     tool: "monitor_market_sentiment_shift",
@@ -64,6 +64,10 @@ export function createDemoDependencies(
 
   return {
     evidenceMode: "simulated",
+    publisherRegistry: {
+      "example.com": "demo-origin",
+      "example.org": "demo-public-register",
+    },
     articleFetcher: async (url) => ({
       url,
       text: "Demo/Simulated article: an issuer reports a regulated market filing.",

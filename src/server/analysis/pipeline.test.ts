@@ -10,6 +10,7 @@ import {
   type AnalysisDependencies,
   type ClaimVerification,
   type RyoResult,
+  type VerificationNewsEvidence,
 } from "./pipeline.js";
 
 const FIXED_TIME = "2026-10-08T12:00:00.000Z";
@@ -21,10 +22,20 @@ function ryoArguments(tool: string): Record<string, unknown> {
   return {};
 }
 
+const requiredAvailability: Readonly<Record<string, readonly string[]>> = {
+  market_overview: ["market"],
+  analyze_token: ["market", "technicals"],
+  deep_analysis: ["primary", "derivatives"],
+  monitor_market_sentiment_shift: ["sentiment"],
+};
+
+function usableAvailability(tool: string): Record<string, unknown> {
+  return Object.fromEntries(
+    requiredAvailability[tool]!.map((key) => [key, "available"]),
+  );
+}
+
 function ryoResult(tool: string): RyoResult {
-  const availability = tool === "analyze_token"
-    ? { market: "available", technicals: "ok" }
-    : { data: "available" };
   return {
     tool,
     status: "ok",
@@ -34,7 +45,7 @@ function ryoResult(tool: string): RyoResult {
     data: tool === "analyze_token"
       ? { market: { price_usd: 100 }, technicals: { atr_14: 5 } }
       : { available: true },
-    availability,
+    availability: usableAvailability(tool),
     summary: `${tool} available`,
     warnings: [],
   };
@@ -92,6 +103,10 @@ function makeDependencies(
     },
     now: vi.fn(() => new Date(FIXED_TIME)),
     id: vi.fn(() => "receipt-1"),
+    publisherRegistry: {
+      "example.com": "fixture-origin",
+      "example.org": "fixture-independent",
+    },
     ...overrides,
   };
 }
@@ -107,7 +122,9 @@ it("canonicalizes source URLs before comparing publishers", () => {
     "HTTPS://ExAmPle.com:443/a/../news?utm_source=x&b=2&gclid=y&a=1#section",
   )).toBe("https://example.com/news?a=1&b=2");
   expect(publisherKey("https://www.news.Example.com/story")).toBe("example.com");
-  expect(publisherKey("https://192.0.2.10/story")).toBe("192.0.2.10");
+  expect(publisherKey("https://news.bbc.co.uk/story")).toBe("bbc.co.uk");
+  expect(publisherKey("https://192.0.2.10/story")).toBeNull();
+  expect(publisherKey("http://localhost/story")).toBeNull();
 });
 
 it.each([
@@ -164,6 +181,177 @@ it("keeps only the first news item from a duplicate publisher", async () => {
     expect.any(Array),
     [expect.objectContaining({ id: "news-1", title: "First independent report" })],
   );
+});
+
+it("rejects cross-domain news registered to the article publisher", async () => {
+  const verifyClaims = vi.fn(async () => [verification("claim-1")]);
+  const dependencies = makeDependencies({
+    newsSearcher: vi.fn(async () => [{
+      title: "BBC UK report",
+      url: "https://www.bbc.co.uk/news/story",
+      excerpt: "A report from another BBC domain.",
+    }]),
+    publisherRegistry: {
+      "bbc.com": " bbc ",
+      "bbc.co.uk": "bbc",
+    },
+    llm: { ...makeDependencies().llm, verifyClaims },
+  });
+
+  const receipt = await createAnalysisPipeline(dependencies).run({
+    ...rawInput,
+    articleUrl: "https://www.bbc.com/news/story",
+  });
+
+  expect(receipt.verdict).toBe("NO_TRADE");
+  expect(receipt.reasonCodes).toContain("INSUFFICIENT_EVIDENCE");
+  expect(verifyClaims).not.toHaveBeenCalled();
+});
+
+it("fails closed when distinct domains are absent from the publisher registry", async () => {
+  const verifyClaims = vi.fn(async () => [verification("claim-1")]);
+  const dependencies = makeDependencies({
+    publisherRegistry: {},
+    llm: { ...makeDependencies().llm, verifyClaims },
+  });
+
+  const receipt = await createAnalysisPipeline(dependencies).run(rawInput);
+
+  expect(receipt.verdict).toBe("NO_TRADE");
+  expect(receipt.reasonCodes).toContain("INSUFFICIENT_EVIDENCE");
+  expect(verifyClaims).not.toHaveBeenCalled();
+});
+
+it("defaults an omitted publisher registry to empty", async () => {
+  const verifyClaims = vi.fn(async () => [verification("claim-1")]);
+  const dependencies = makeDependencies({
+    llm: { ...makeDependencies().llm, verifyClaims },
+  });
+  delete dependencies.publisherRegistry;
+
+  const receipt = await createAnalysisPipeline(dependencies).run(rawInput);
+
+  expect(receipt.verdict).toBe("NO_TRADE");
+  expect(verifyClaims).not.toHaveBeenCalled();
+});
+
+it("treats a blank registry publisher id as unregistered", async () => {
+  const verifyClaims = vi.fn(async () => [verification("claim-1")]);
+  const dependencies = makeDependencies({
+    publisherRegistry: {
+      "example.com": "origin",
+      "example.org": "   ",
+    },
+    llm: { ...makeDependencies().llm, verifyClaims },
+  });
+
+  const receipt = await createAnalysisPipeline(dependencies).run(rawInput);
+
+  expect(receipt.verdict).toBe("NO_TRADE");
+  expect(verifyClaims).not.toHaveBeenCalled();
+});
+
+it("accepts distinct registered publisher identities", async () => {
+  const receipt = await createAnalysisPipeline(makeDependencies({
+    publisherRegistry: {
+      "example.com": "origin",
+      "example.org": "public-register",
+    },
+  })).run(rawInput);
+
+  expect(receipt.verdict).toBe("LONG");
+  expect(receipt.claims[0]).toMatchObject({
+    status: "verified",
+    evidenceIds: ["news-1"],
+  });
+});
+
+it("uses the PSL to keep distinct registered co.uk publishers", async () => {
+  const verifyClaims = vi.fn(async (
+    claims: Array<{ id: string }>,
+    news: VerificationNewsEvidence[],
+  ) =>
+    claims.map(({ id }) => verification(id, "verified", news.map(({ id }) => id)))
+  );
+  const dependencies = makeDependencies({
+    newsSearcher: vi.fn(async () => [{
+      title: "BBC report",
+      url: "https://news.bbc.co.uk/story",
+      excerpt: "BBC report excerpt.",
+    }, {
+      title: "Independent report",
+      url: "https://www.independent.co.uk/story",
+      excerpt: "Independent report excerpt.",
+    }]),
+    publisherRegistry: {
+      "example.com": "origin",
+      "bbc.co.uk": "bbc",
+      "independent.co.uk": "independent",
+    },
+    llm: { ...makeDependencies().llm, verifyClaims },
+  });
+
+  const receipt = await createAnalysisPipeline(dependencies).run(rawInput);
+
+  expect(receipt.verdict).toBe("LONG");
+  expect(receipt.evidence.filter(({ kind }) => kind === "news")).toHaveLength(2);
+  expect(verifyClaims.mock.calls[0]?.[1].map(({ url }) => url)).toEqual([
+    "https://news.bbc.co.uk/story",
+    "https://www.independent.co.uk/story",
+  ]);
+});
+
+it("deduplicates cross-domain news with the same registered publisher id", async () => {
+  const verifyClaims = vi.fn(async (
+    _claims: Array<{ id: string }>,
+    _news: VerificationNewsEvidence[],
+  ) => [verification("claim-1")]);
+  const dependencies = makeDependencies({
+    newsSearcher: vi.fn(async () => [{
+      title: "BBC US report",
+      url: "https://www.bbc.com/story",
+      excerpt: "First BBC report.",
+    }, {
+      title: "BBC UK report",
+      url: "https://www.bbc.co.uk/story",
+      excerpt: "Second BBC report.",
+    }]),
+    publisherRegistry: {
+      "example.com": "origin",
+      "bbc.com": "bbc",
+      "bbc.co.uk": "bbc",
+    },
+    llm: { ...makeDependencies().llm, verifyClaims },
+  });
+
+  const receipt = await createAnalysisPipeline(dependencies).run(rawInput);
+
+  expect(receipt.verdict).toBe("LONG");
+  expect(receipt.evidence.filter(({ kind }) => kind === "news")).toHaveLength(1);
+  expect(verifyClaims.mock.calls[0]?.[1]).toEqual([
+    expect.objectContaining({ title: "BBC US report", id: "news-1" }),
+  ]);
+});
+
+it.each([
+  "http://127.0.0.1/report",
+  "http://localhost/report",
+])("does not accept %s as independent news", async (url) => {
+  const verifyClaims = vi.fn(async () => [verification("claim-1")]);
+  const dependencies = makeDependencies({
+    newsSearcher: vi.fn(async () => [{ title: "Local", url, excerpt: "Local." }]),
+    publisherRegistry: {
+      "example.com": "origin",
+      "127.0.0.1": "local-ip",
+      localhost: "local-host",
+    },
+    llm: { ...makeDependencies().llm, verifyClaims },
+  });
+
+  const receipt = await createAnalysisPipeline(dependencies).run(rawInput);
+
+  expect(receipt.verdict).toBe("NO_TRADE");
+  expect(verifyClaims).not.toHaveBeenCalled();
 });
 
 async function rejectionSnapshot(promise: Promise<unknown>) {
@@ -414,7 +602,7 @@ it("preserves validated RYO request, data, and availability provenance", async (
   expect(tokenEvidence?.payload).toEqual({
     request: { symbol: "SOL", endpoint: "fixture" },
     data: { market: { price_usd: 100 }, technicals: { atr_14: 5 } },
-    availability: { market: "available", technicals: "ok" },
+    availability: { market: "available", technicals: "available" },
   });
   expect(receipt.verdict).toBe("LONG");
 });
@@ -454,7 +642,9 @@ it.each([
     dataMode: "unknown",
     payload: {
       request: ryoArguments(failedTool),
-      availability: { available: false },
+      availability: Object.fromEntries(
+        requiredAvailability[failedTool]!.map((key) => [key, false]),
+      ),
     },
   });
   expect(failedEvidence?.summary).toContain("Pipeline fallback");
@@ -480,17 +670,49 @@ it.each([
     .toMatchObject({ status: "unavailable", dataMode: "unknown" });
 });
 
-it.each([
-  ["empty object", {}],
-  ["false leaf", { market: false }],
-  ["unavailable leaf", { market: "unavailable" }],
-  ["unknown leaf", { market: "unknown" }],
-  ["null leaf", { market: null }],
-  ["array value", { market: ["available"] }],
-] as const)("blocks live RYO evidence with %s availability", async (_name, availability) => {
+const invalidAvailabilityCases = Object.entries(requiredAvailability).flatMap(
+  ([tool, keys]) => {
+    const valid = usableAvailability(tool);
+    const [requiredKey] = keys;
+    const missing = { ...valid };
+    delete missing[requiredKey!];
+    return [
+      [tool, "missing required key", missing],
+      [tool, "false required key", { ...valid, [requiredKey!]: false }],
+      [tool, "unavailable required key", {
+        ...valid,
+        [requiredKey!]: "unavailable",
+      }],
+      [tool, "legacy ok required key", { ...valid, [requiredKey!]: "ok" }],
+      [tool, "only unrelated metadata", { unrelated_metadata: "available" }],
+    ] as const;
+  },
+);
+
+it("accepts true or available for every required availability key", async () => {
   const dependencies = makeDependencies({
     ryo: {
-      call: vi.fn(async (tool: string) => tool === "analyze_token"
+      call: vi.fn(async (tool: string) => {
+        const availability = usableAvailability(tool);
+        const [firstKey] = requiredAvailability[tool]!;
+        availability[firstKey!] = true;
+        return { ...ryoResult(tool), availability };
+      }),
+    },
+  });
+
+  const receipt = await createAnalysisPipeline(dependencies).run(rawInput);
+
+  expect(receipt.verdict).toBe("LONG");
+  expect(replayReceipt(receipt).identical).toBe(true);
+});
+
+it.each(invalidAvailabilityCases)(
+  "blocks %s with %s availability",
+  async (failedTool, _name, availability) => {
+  const dependencies = makeDependencies({
+    ryo: {
+      call: vi.fn(async (tool: string) => tool === failedTool
         ? { ...ryoResult(tool), availability }
         : ryoResult(tool)),
     },
@@ -500,7 +722,9 @@ it.each([
 
   expect(receipt.verdict).toBe("NO_TRADE");
   expect(receipt.reasonCodes).toContain("MARKET_DATA_UNAVAILABLE");
-});
+  expect(replayReceipt(receipt).identical).toBe(true);
+  },
+);
 
 it.each([
   ["exactly 24 hours old", "2026-10-07T12:00:00.000Z", "LONG"],

@@ -51,7 +51,7 @@ it("creates a replayable supported simulated decision receipt offline", async ()
   )).toEqual([
     { market: "available" },
     { market: "available", technicals: "available" },
-    { primary: "available" },
+    { primary: "available", derivatives: "available" },
     { sentiment: "available" },
   ]);
 });

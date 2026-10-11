@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { isIP } from "node:net";
+import { getDomain } from "tldts";
 import { z } from "zod";
 import {
   analysisRequestSchema,
@@ -65,6 +65,7 @@ export type AnalysisDependencies = {
   now: () => Date;
   id?: () => string;
   evidenceMode?: "live" | "simulated";
+  publisherRegistry?: Readonly<Record<string, string>>;
 };
 const articleOutputSchema = z.object({
   url: z.string().trim().pipe(z.url({ protocol: /^https?$/ })),
@@ -76,6 +77,17 @@ const newsResultSchema = z.object({
   excerpt: z.string().trim().min(1),
 });
 const newsResultsSchema = z.array(newsResultSchema).max(5);
+const publisherIdentitySchema = z.object({
+  domain: z.string().trim().min(1),
+  id: z.string().trim().min(1),
+}).strict();
+const articleEvidencePayloadSchema = z.object({
+  text: z.string(),
+  publisher: publisherIdentitySchema.nullable(),
+}).strict();
+const newsEvidencePayloadSchema = newsResultSchema.extend({
+  publisher: publisherIdentitySchema,
+}).strict();
 const extractedClaimSchema = z.object({
   id: z.string().trim().min(1),
   text: z.string().trim().min(1),
@@ -126,8 +138,16 @@ const evidenceModeSchema = z.enum(["live", "simulated"]);
 const trackingParameters = new Set(["gclid", "fbclid", "mc_cid", "mc_eid"]);
 const maxRyoAgeMs = 24 * 60 * 60 * 1_000;
 const maxRyoFutureSkewMs = 5 * 60 * 1_000;
+const requiredRyoAvailabilityKeys: Readonly<Record<string, readonly string[]>> = {
+  market_overview: ["market"],
+  analyze_token: ["market", "technicals"],
+  deep_analysis: ["primary", "derivatives"],
+  monitor_market_sentiment_shift: ["sentiment"],
+};
 
 type JsonObject = z.infer<typeof jsonObjectSchema>;
+type PublisherIdentity = z.infer<typeof publisherIdentitySchema>;
+type IndependentNewsResult = NewsResult & { publisher: PublisherIdentity };
 type ValidatedRyoResult = Omit<
   z.infer<typeof ryoResultSchema>,
   "request" | "availability"
@@ -172,41 +192,53 @@ export function canonicalizeSourceUrl(rawUrl: string): string {
   return url.toString();
 }
 
-export function publisherKey(rawUrl: string): string {
-  const hostname = new URL(canonicalizeSourceUrl(rawUrl)).hostname.toLowerCase();
-  const unbracketedHostname = hostname.startsWith("[") && hostname.endsWith("]")
-    ? hostname.slice(1, -1)
-    : hostname;
-  if (isIP(unbracketedHostname)) return unbracketedHostname;
+export function publisherKey(rawUrl: string): string | null {
+  return getDomain(canonicalizeSourceUrl(rawUrl));
+}
 
-  const withoutWww = hostname.startsWith("www.") ? hostname.slice(4) : hostname;
-  const labels = withoutWww.split(".").filter(Boolean);
-  return labels.slice(-2).join(".");
+function registeredPublisherIdentity(
+  rawUrl: string,
+  publisherRegistry: Readonly<Record<string, string>>,
+): PublisherIdentity | null {
+  const domain = publisherKey(rawUrl);
+  if (!domain) return null;
+  const id = publisherRegistry[domain]?.trim();
+  return id ? { domain, id } : null;
 }
 
 function filterIndependentNews(
   articleUrl: string,
   news: NewsResult[],
-): NewsResult[] {
+  publisherRegistry: Readonly<Record<string, string>>,
+): IndependentNewsResult[] {
   const canonicalArticleUrl = canonicalizeSourceUrl(articleUrl);
-  const articlePublisher = publisherKey(canonicalArticleUrl);
+  const articlePublisher = registeredPublisherIdentity(
+    canonicalArticleUrl,
+    publisherRegistry,
+  );
+  if (!articlePublisher) return [];
   const seenUrls = new Set<string>();
-  const seenPublishers = new Set<string>();
+  const seenDomains = new Set<string>();
+  const seenPublisherIds = new Set<string>();
 
   return news.flatMap((item) => {
     const canonicalUrl = canonicalizeSourceUrl(item.url);
-    const publisher = publisherKey(canonicalUrl);
+    const publisher = registeredPublisherIdentity(canonicalUrl, publisherRegistry);
     if (
+      !publisher ||
       canonicalUrl === canonicalArticleUrl ||
-      publisher === articlePublisher ||
+      publisher.domain === articlePublisher.domain ||
+      publisher.id === articlePublisher.id ||
       seenUrls.has(canonicalUrl) ||
-      seenPublishers.has(publisher)
+      seenDomains.has(publisher.domain) ||
+      seenPublisherIds.has(publisher.id)
     ) {
       return [];
     }
     seenUrls.add(canonicalUrl);
-    seenPublishers.add(publisher);
-    return [{ ...item, url: canonicalUrl }];
+    seenDomains.add(publisher.domain);
+    seenPublisherIds.add(publisher.id);
+    return [{ ...item, url: canonicalUrl, publisher }];
   });
 }
 
@@ -282,6 +314,24 @@ function requestContainsExpected(
   );
 }
 
+function requiredAvailabilityKeys(tool: string): readonly string[] {
+  return requiredRyoAvailabilityKeys[tool] ?? [];
+}
+
+function unavailableAvailability(tool: string): JsonObject {
+  return Object.fromEntries(
+    requiredAvailabilityKeys(tool).map((key) => [key, false]),
+  );
+}
+
+function ryoAvailabilityIsUsable(tool: string, availability: JsonObject): boolean {
+  const requiredKeys = requiredAvailabilityKeys(tool);
+  return requiredKeys.length > 0 && requiredKeys.every((key) =>
+    Object.prototype.hasOwnProperty.call(availability, key) &&
+    (availability[key] === true || availability[key] === "available")
+  );
+}
+
 function unavailableRyoResult(
   request: RyoRequest,
   asOf: string,
@@ -293,7 +343,7 @@ function unavailableRyoResult(
     asOf,
     request: jsonObjectSchema.parse(request.arguments),
     data: { available: false },
-    availability: { available: false },
+    availability: unavailableAvailability(request.tool),
     summary: `Pipeline fallback: ${request.tool} is unavailable.`,
     warnings: ["Pipeline fallback replaced unavailable RYO evidence."],
   };
@@ -468,22 +518,6 @@ function inferEvidenceMode(evidence: Evidence[]): "live" | "simulated" {
     : "live";
 }
 
-function availabilityIsUsable(value: unknown): boolean {
-  if (value === true) return true;
-  if (typeof value === "string") {
-    return value.trim().toLowerCase() === "available" ||
-      value.trim().toLowerCase() === "ok";
-  }
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-
-  const entries = Object.entries(value);
-  return entries.length > 0 && entries.every(([, nested]) =>
-    availabilityIsUsable(nested)
-  );
-}
-
 function ryoTimestampIsFresh(observedAt: string | null, decisionAt: string): boolean {
   if (!observedAt) return false;
   const observedAtMs = Date.parse(observedAt);
@@ -532,7 +566,7 @@ function deriveMarketInputs(
       usableMode &&
       payload?.success &&
       requestContainsExpected(payload.data.request, request.arguments) &&
-      availabilityIsUsable(payload.data.availability) &&
+      ryoAvailabilityIsUsable(request.tool, payload.data.availability) &&
       ryoTimestampIsFresh(item.observedAt, decisionAt),
     );
     return { payload, usable };
@@ -560,27 +594,37 @@ function independentNewsEvidence(evidence: Evidence[]): Evidence[] {
 
   try {
     const articleUrl = canonicalizeSourceUrl(articles[0]!.source);
-    const articlePublisher = publisherKey(articleUrl);
+    const articlePayload = articleEvidencePayloadSchema.safeParse(
+      articles[0]!.payload,
+    );
+    if (!articlePayload.success || !articlePayload.data.publisher) return [];
+    const articlePublisher = articlePayload.data.publisher;
+    if (publisherKey(articleUrl) !== articlePublisher.domain) return [];
     const seenUrls = new Set<string>();
-    const seenPublishers = new Set<string>();
+    const seenDomains = new Set<string>();
+    const seenPublisherIds = new Set<string>();
     const independent: Evidence[] = [];
     for (const item of evidence) {
       if (item.kind !== "news" || item.status === "unavailable") continue;
-      const payload = newsResultSchema.safeParse(item.payload);
+      const payload = newsEvidencePayloadSchema.safeParse(item.payload);
       if (!payload.success) return [];
       const sourceUrl = canonicalizeSourceUrl(item.source);
       if (sourceUrl !== canonicalizeSourceUrl(payload.data.url)) return [];
-      const publisher = publisherKey(sourceUrl);
+      const publisher = payload.data.publisher;
+      if (publisherKey(sourceUrl) !== publisher.domain) return [];
       if (
         sourceUrl === articleUrl ||
-        publisher === articlePublisher ||
+        publisher.domain === articlePublisher.domain ||
+        publisher.id === articlePublisher.id ||
         seenUrls.has(sourceUrl) ||
-        seenPublishers.has(publisher)
+        seenDomains.has(publisher.domain) ||
+        seenPublisherIds.has(publisher.id)
       ) {
         return [];
       }
       seenUrls.add(sourceUrl);
-      seenPublishers.add(publisher);
+      seenDomains.add(publisher.domain);
+      seenPublisherIds.add(publisher.id);
       independent.push(item);
     }
     return independent;
@@ -758,6 +802,12 @@ function generateReceiptId(deps: AnalysisDependencies): string {
 
 export function createAnalysisPipeline(deps: AnalysisDependencies) {
   const evidenceMode = evidenceModeSchema.parse(deps.evidenceMode ?? "live");
+  const publisherRegistry: Readonly<Record<string, string>> = Object.fromEntries(
+    Object.entries(deps.publisherRegistry ?? {}).map(([domain, id]) => [
+      domain.trim().toLowerCase(),
+      id,
+    ]),
+  );
 
   return {
     async run(rawInput: unknown) {
@@ -766,6 +816,10 @@ export function createAnalysisPipeline(deps: AnalysisDependencies) {
       const modelName = readModelName(deps);
       const article = await fetchArticleEvidence(deps, input.articleUrl);
       const articleUrl = canonicalizeSourceUrl(article.url);
+      const articlePublisher = registeredPublisherIdentity(
+        articleUrl,
+        publisherRegistry,
+      );
 
       let modelUnavailable = false;
       let extractedClaims: ExtractedClaim[] = [];
@@ -795,11 +849,18 @@ export function createAnalysisPipeline(deps: AnalysisDependencies) {
         }
       }
 
-      const verificationNews: VerificationNewsEvidence[] = filterIndependentNews(
+      const independentNews = filterIndependentNews(
         articleUrl,
         news,
-      ).map(
-        (item, index) => ({ id: `news-${index + 1}`, ...item }),
+        publisherRegistry,
+      );
+      const verificationNews: VerificationNewsEvidence[] = independentNews.map(
+        ({ title, url, excerpt }, index) => ({
+          id: `news-${index + 1}`,
+          title,
+          url,
+          excerpt,
+        }),
       );
       const verification = modelUnavailable
         ? {
@@ -830,7 +891,7 @@ export function createAnalysisPipeline(deps: AnalysisDependencies) {
         observedAt: null,
         status: "ok",
         dataMode: evidenceMode,
-        payload: article.text,
+        payload: { text: article.text, publisher: articlePublisher },
         summary: article.text.slice(0, 180),
         warnings: [],
       });
@@ -849,9 +910,9 @@ export function createAnalysisPipeline(deps: AnalysisDependencies) {
           warnings: ["Independent news evidence is unavailable."],
         });
       } else {
-        verificationNews.forEach((item) => {
+        independentNews.forEach((item, index) => {
           addEvidence({
-            id: item.id,
+            id: `news-${index + 1}`,
             kind: "news",
             source: item.url,
             retrievedAt,
@@ -862,6 +923,7 @@ export function createAnalysisPipeline(deps: AnalysisDependencies) {
               title: item.title,
               url: item.url,
               excerpt: item.excerpt,
+              publisher: item.publisher,
             },
             summary: item.excerpt,
             warnings: [],
