@@ -26,6 +26,13 @@ export function openDatabase(path: string): Database.Database {
 
   try {
     db.pragma("foreign_keys = ON");
+    db.pragma("recursive_triggers = ON");
+    if (
+      db.pragma("foreign_keys", { simple: true }) !== 1 ||
+      db.pragma("recursive_triggers", { simple: true }) !== 1
+    ) {
+      throw new Error("Required database pragmas are unavailable");
+    }
     if (normalizedPath !== ":memory:") {
       db.pragma("journal_mode = WAL");
     }

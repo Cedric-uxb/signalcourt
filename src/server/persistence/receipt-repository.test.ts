@@ -86,11 +86,12 @@ afterEach(() => {
 });
 
 describe("openDatabase", () => {
-  it("opens an in-memory database with foreign keys enabled", () => {
+  it("opens an in-memory database with required pragmas enabled", () => {
     const db = openDatabase(" :memory: ");
 
     try {
       expect(db.prepare("PRAGMA foreign_keys").pluck().get()).toBe(1);
+      expect(db.prepare("PRAGMA recursive_triggers").pluck().get()).toBe(1);
       expect(db.name).toBe(":memory:");
     } finally {
       db.close();
@@ -138,6 +139,20 @@ describe("openDatabase", () => {
 });
 
 describe("receipt repository", () => {
+  it("sets and verifies the schema version and recursive triggers", () => {
+    const db = new Database(":memory:");
+    db.pragma("recursive_triggers = OFF");
+
+    try {
+      createReceiptRepository(db);
+
+      expect(db.pragma("user_version", { simple: true })).toBe(1);
+      expect(db.pragma("recursive_triggers", { simple: true })).toBe(1);
+    } finally {
+      db.close();
+    }
+  });
+
   it("stores and returns a valid receipt", () => {
     const db = openDatabase(":memory:");
     const repository = createReceiptRepository(db);
@@ -243,6 +258,120 @@ describe("receipt repository", () => {
     },
   );
 
+  it.each(["INSERT OR REPLACE", "REPLACE"])(
+    "blocks direct %s statements without changing the original receipt",
+    (operation) => {
+      const db = new Database(":memory:");
+      const repository = createReceiptRepository(db);
+      const original = receiptFixture();
+      const replacement = receiptFixture({
+        createdAt: "2026-10-11T13:00:00.000Z",
+        confidence: 0.5,
+      });
+      const replaceStatement = db.prepare(
+        `${operation} INTO receipts (id, created_at, payload) VALUES (?, ?, ?)`,
+      );
+
+      try {
+        repository.insert(original);
+
+        expect(() =>
+          replaceStatement.run(
+            replacement.id,
+            replacement.createdAt,
+            canonicalJson(replacement),
+          ),
+        ).toThrow("Receipts are append-only");
+        expect(repository.findById(original.id)).toEqual(original);
+      } finally {
+        db.close();
+      }
+    },
+  );
+
+  it("replaces same-name no-op triggers with append-only triggers", () => {
+    const db = openDatabase(":memory:");
+    const repository = createReceiptRepository(db);
+    const receipt = receiptFixture();
+    repository.insert(receipt);
+    db.exec(`
+      DROP TRIGGER receipts_prevent_update;
+      DROP TRIGGER receipts_prevent_delete;
+      CREATE TRIGGER receipts_prevent_update
+      BEFORE UPDATE ON receipts
+      BEGIN
+        SELECT 1;
+      END;
+      CREATE TRIGGER receipts_prevent_delete
+      BEFORE DELETE ON receipts
+      BEGIN
+        SELECT 1;
+      END;
+    `);
+
+    try {
+      const reinitializedRepository = createReceiptRepository(db);
+
+      expect(() =>
+        db.exec("UPDATE receipts SET created_at = 'changed' WHERE id = 'receipt-1'"),
+      ).toThrow("Receipts are append-only");
+      expect(() =>
+        db.exec("DELETE FROM receipts WHERE id = 'receipt-1'"),
+      ).toThrow("Receipts are append-only");
+      expect(reinitializedRepository.findById(receipt.id)).toEqual(receipt);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("rejects a populated legacy table without required constraints", () => {
+    const db = new Database(":memory:");
+    const receipt = receiptFixture();
+    db.exec(`
+      CREATE TABLE receipts (
+        id TEXT PRIMARY KEY NOT NULL,
+        created_at TEXT NOT NULL,
+        payload TEXT NOT NULL
+      )
+    `);
+    db.prepare("INSERT INTO receipts (id, created_at, payload) VALUES (?, ?, ?)").run(
+      receipt.id,
+      receipt.createdAt,
+      canonicalJson(receipt),
+    );
+
+    try {
+      const error = captureError(() => createReceiptRepository(db));
+
+      expect(error.message).toBe("Receipt database schema is incompatible");
+      expect(error.cause).toBeUndefined();
+      expect(db.prepare("SELECT COUNT(*) FROM receipts").pluck().get()).toBe(1);
+      expect(db.pragma("user_version", { simple: true })).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  it.each([
+    ["id", "different-id", "2026-10-11T12:00:00.000Z"],
+    ["created_at", "receipt-1", "2026-10-11T13:00:00.000Z"],
+  ])("rejects a direct insert whose %s does not match its payload", (_field, id, createdAt) => {
+    const db = openDatabase(":memory:");
+    createReceiptRepository(db);
+    const receipt = receiptFixture();
+
+    try {
+      expect(() =>
+        db
+          .prepare("INSERT INTO receipts (id, created_at, payload) VALUES (?, ?, ?)")
+          .run(id, createdAt, canonicalJson(receipt)),
+      ).toThrow();
+      expect(db.prepare("SELECT COUNT(*) FROM receipts").pluck().get()).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+
   it.each([
     ["non-string", 42],
     ["empty", ""],
@@ -278,20 +407,15 @@ describe("receipt repository", () => {
     ["malformed JSON", "raw-payload-sentinel"],
     ["schema-invalid JSON", '{"secret":"raw-payload-sentinel"}'],
   ])("returns a fixed error for %s", (_label, payload) => {
-    const db = new Database(":memory:");
-    db.exec(`
-      CREATE TABLE receipts (
-        id TEXT PRIMARY KEY NOT NULL,
-        created_at TEXT NOT NULL,
-        payload TEXT NOT NULL
-      )
-    `);
+    const db = openDatabase(":memory:");
+    const repository = createReceiptRepository(db);
+    db.pragma("ignore_check_constraints = ON");
     db.prepare("INSERT INTO receipts (id, created_at, payload) VALUES (?, ?, ?)").run(
       "corrupt-receipt",
       "2026-10-11T12:00:00.000Z",
       payload,
     );
-    const repository = createReceiptRepository(db);
+    db.pragma("ignore_check_constraints = OFF");
 
     try {
       const error = captureError(() => repository.findById("corrupt-receipt"));
@@ -299,6 +423,32 @@ describe("receipt repository", () => {
       expect(error.message).toBe("Receipt data is invalid");
       expect(error.cause).toBeUndefined();
       expect(error.message).not.toContain("raw-payload-sentinel");
+    } finally {
+      db.close();
+    }
+  });
+
+  it.each([
+    ["id", "stored-id", "2026-10-11T12:00:00.000Z"],
+    ["created_at", "receipt-1", "2026-10-11T13:00:00.000Z"],
+  ])("returns a fixed error when stored %s differs from the payload", (_field, id, createdAt) => {
+    const db = openDatabase(":memory:");
+    const repository = createReceiptRepository(db);
+    const receipt = receiptFixture();
+    db.pragma("ignore_check_constraints = ON");
+    db.prepare("INSERT INTO receipts (id, created_at, payload) VALUES (?, ?, ?)").run(
+      id,
+      createdAt,
+      canonicalJson(receipt),
+    );
+    db.pragma("ignore_check_constraints = OFF");
+
+    try {
+      const error = captureError(() => repository.findById(id));
+
+      expect(error.message).toBe("Receipt data is invalid");
+      expect(error.cause).toBeUndefined();
+      expect(error.message).not.toContain(canonicalJson(receipt));
     } finally {
       db.close();
     }
