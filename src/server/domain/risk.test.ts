@@ -61,6 +61,17 @@ describe("buildRiskPlan", () => {
     });
   });
 
+  it("rejects positive risk values that become zero after rounding", () => {
+    expect(
+      buildRiskPlan({
+        verdict: "LONG",
+        price: 5e-9,
+        atr: 1e-9,
+        riskLevel: "balanced",
+      }),
+    ).toBeNull();
+  });
+
   it.each([
     { verdict: "NO_TRADE" as const, price: 100, atr: 5 },
     { verdict: "LONG" as const, price: undefined, atr: 5 },

@@ -40,19 +40,19 @@ export function buildRiskPlan(input: RiskInput): RiskPlan | null {
   const direction = verdict === "LONG" ? 1 : -1;
   const stop = price - direction * 2 * atr;
   const target = price + direction * 3 * atr;
-  if (
-    !Number.isFinite(stop) ||
-    !Number.isFinite(target) ||
-    stop <= 0 ||
-    target <= 0
-  ) {
+  const roundedEntry = roundReceiptNumber(price);
+  const roundedStop = roundReceiptNumber(stop);
+  const roundedTarget = roundReceiptNumber(target);
+  const roundedValues = [roundedEntry, roundedStop, roundedTarget];
+
+  if (roundedValues.some((value) => !Number.isFinite(value) || value <= 0)) {
     return null;
   }
 
   return {
-    entry: roundReceiptNumber(price),
-    stop: roundReceiptNumber(stop),
-    target: roundReceiptNumber(target),
+    entry: roundedEntry,
+    stop: roundedStop,
+    target: roundedTarget,
     practiceSizeUsd: practiceSizeUsdByRiskProfile[riskLevel],
   };
 }
