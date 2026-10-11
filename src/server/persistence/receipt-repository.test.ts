@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import Database from "better-sqlite3";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { receiptSchema, type Receipt } from "../../shared/contracts.js";
 import { canonicalJson } from "../domain/canonical-json.js";
@@ -77,6 +77,49 @@ function captureError(operation: () => unknown): Error {
     throw new Error("Expected operation to throw an Error");
   }
   throw new Error("Expected operation to throw");
+}
+
+function createLegacyReceiptTable(
+  db: Database.Database,
+  options: { noOpTriggers?: boolean } = {},
+): void {
+  db.exec(`
+    CREATE TABLE receipts (
+      id TEXT PRIMARY KEY NOT NULL,
+      created_at TEXT NOT NULL,
+      payload TEXT NOT NULL
+    )
+  `);
+
+  if (options.noOpTriggers) {
+    db.exec(`
+      CREATE TRIGGER receipts_prevent_update
+      BEFORE UPDATE ON receipts
+      BEGIN
+        SELECT 1;
+      END;
+      CREATE TRIGGER receipts_prevent_delete
+      BEFORE DELETE ON receipts
+      BEGIN
+        SELECT 1;
+      END;
+    `);
+  }
+}
+
+function receiptTableSql(db: Database.Database): string {
+  return db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'receipts'")
+    .pluck()
+    .get() as string;
+}
+
+function receiptTriggerSql(db: Database.Database): Array<{ name: string; sql: string }> {
+  return db
+    .prepare(
+      "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'receipts' ORDER BY name",
+    )
+    .all() as Array<{ name: string; sql: string }>;
 }
 
 afterEach(() => {
@@ -324,16 +367,93 @@ describe("receipt repository", () => {
     }
   });
 
+  it("migrates an empty version-zero legacy table to the current schema", () => {
+    const db = new Database(":memory:");
+    createLegacyReceiptTable(db, { noOpTriggers: true });
+    const receipt = receiptFixture();
+
+    try {
+      const repository = createReceiptRepository(db);
+      repository.insert(receipt);
+
+      expect(db.pragma("user_version", { simple: true })).toBe(1);
+      expect(repository.findById(receipt.id)).toEqual(receipt);
+      expect(() =>
+        db.exec("UPDATE receipts SET created_at = 'changed' WHERE id = 'receipt-1'"),
+      ).toThrow("Receipts are append-only");
+      expect(() =>
+        db.exec("DELETE FROM receipts WHERE id = 'receipt-1'"),
+      ).toThrow("Receipts are append-only");
+      expect(() =>
+        db
+          .prepare("INSERT INTO receipts (id, created_at, payload) VALUES (?, ?, ?)")
+          .run("different-id", receipt.createdAt, canonicalJson(receipt)),
+      ).toThrow();
+      expect(() =>
+        db
+          .prepare("INSERT INTO receipts (id, created_at, payload) VALUES (?, ?, ?)")
+          .run("invalid-json", receipt.createdAt, "not-json"),
+      ).toThrow();
+    } finally {
+      db.close();
+    }
+  });
+
+  it("rolls back the empty-table migration when rebuilding fails", () => {
+    const db = new Database(":memory:");
+    createLegacyReceiptTable(db, { noOpTriggers: true });
+    const legacySql = receiptTableSql(db);
+    const legacyTriggerSql = receiptTriggerSql(db);
+    const originalExec = db.exec.bind(db);
+    const execSpy = vi.spyOn(db, "exec").mockImplementation((sql) => {
+      if (sql.includes("CREATE TABLE receipts")) {
+        throw new Error("forced rebuild failure");
+      }
+      return originalExec(sql);
+    });
+
+    const error = (() => {
+      try {
+        return captureError(() => createReceiptRepository(db));
+      } finally {
+        execSpy.mockRestore();
+      }
+    })();
+
+    try {
+      expect(error.message).toBe("Failed to initialize receipt database");
+      expect(error.cause).toBeUndefined();
+      expect(receiptTableSql(db)).toBe(legacySql);
+      expect(db.prepare("SELECT COUNT(*) FROM receipts").pluck().get()).toBe(0);
+      expect(db.pragma("user_version", { simple: true })).toBe(0);
+      expect(receiptTriggerSql(db)).toEqual(legacyTriggerSql);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("does not migrate an empty incompatible table with a nonzero version", () => {
+    const db = new Database(":memory:");
+    createLegacyReceiptTable(db);
+    const legacySql = receiptTableSql(db);
+    db.pragma("user_version = 2");
+
+    try {
+      const error = captureError(() => createReceiptRepository(db));
+
+      expect(error.message).toBe("Receipt database schema is incompatible");
+      expect(error.cause).toBeUndefined();
+      expect(receiptTableSql(db)).toBe(legacySql);
+      expect(db.pragma("user_version", { simple: true })).toBe(2);
+    } finally {
+      db.close();
+    }
+  });
+
   it("rejects a populated legacy table without required constraints", () => {
     const db = new Database(":memory:");
     const receipt = receiptFixture();
-    db.exec(`
-      CREATE TABLE receipts (
-        id TEXT PRIMARY KEY NOT NULL,
-        created_at TEXT NOT NULL,
-        payload TEXT NOT NULL
-      )
-    `);
+    createLegacyReceiptTable(db);
     db.prepare("INSERT INTO receipts (id, created_at, payload) VALUES (?, ?, ?)").run(
       receipt.id,
       receipt.createdAt,
@@ -346,6 +466,9 @@ describe("receipt repository", () => {
       expect(error.message).toBe("Receipt database schema is incompatible");
       expect(error.cause).toBeUndefined();
       expect(db.prepare("SELECT COUNT(*) FROM receipts").pluck().get()).toBe(1);
+      expect(db.prepare("SELECT payload FROM receipts").pluck().get()).toBe(
+        canonicalJson(receipt),
+      );
       expect(db.pragma("user_version", { simple: true })).toBe(0);
     } finally {
       db.close();

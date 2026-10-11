@@ -132,7 +132,20 @@ function initializeReceiptSchema(db: Database.Database): void {
         if (version !== 0) throw new IncompatibleReceiptSchemaError();
         db.exec(CREATE_RECEIPTS_TABLE_SQL);
       } else if (!hasCompatibleReceiptSchema(db)) {
-        throw new IncompatibleReceiptSchemaError();
+        const receiptCount = db
+          .prepare("SELECT COUNT(*) FROM receipts")
+          .pluck()
+          .get();
+        if (version !== 0 || receiptCount !== 0) {
+          throw new IncompatibleReceiptSchemaError();
+        }
+
+        db.exec(`
+          DROP TRIGGER IF EXISTS main.receipts_prevent_update;
+          DROP TRIGGER IF EXISTS main.receipts_prevent_delete;
+        `);
+        db.exec("DROP TABLE receipts");
+        db.exec(CREATE_RECEIPTS_TABLE_SQL);
       }
 
       db.exec(`
