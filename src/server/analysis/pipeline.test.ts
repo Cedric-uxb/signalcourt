@@ -281,6 +281,42 @@ it("fails closed when one debate side throws or returns an invalid argument", as
   expect(JSON.stringify(receipt)).not.toContain("raw bull failure");
 });
 
+it.each(["bull", "bear"] as const)(
+  "contains a synchronous %s argument failure and still triggers both sides",
+  async (failedStance) => {
+    const rawError = `raw synchronous ${failedStance} failure`;
+    const argue = vi.fn(
+      (stance: "bull" | "bear"): Promise<Argument> => {
+        if (stance === failedStance) throw new Error(rawError);
+        return Promise.resolve(argument(stance));
+      },
+    );
+    const dependencies = makeDependencies({
+      llm: {
+        model: "fixture-model",
+        extractClaims: vi.fn(async () => [{ id: "claim-1", text: "Claim" }]),
+        argue,
+      },
+    });
+
+    const receipt = await createAnalysisPipeline(dependencies).run(rawInput);
+
+    expect(receiptSchema.safeParse(receipt).success).toBe(true);
+    expect(receipt).toMatchObject({
+      verdict: "NO_TRADE",
+      confidence: 0,
+      reasonCodes: ["MODEL_UNAVAILABLE"],
+      riskPlan: null,
+      arguments: [
+        { stance: "bull", confidence: 0, citations: ["article-1"] },
+        { stance: "bear", confidence: 0, citations: ["article-1"] },
+      ],
+    });
+    expect(argue.mock.calls.map(([stance]) => stance)).toEqual(["bull", "bear"]);
+    expect(JSON.stringify(receipt)).not.toContain(rawError);
+  },
+);
+
 it("validates extracted claims for limits, uniqueness, and nonempty text", async () => {
   const dependencies = makeDependencies({
     llm: {

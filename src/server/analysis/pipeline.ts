@@ -199,8 +199,8 @@ async function collectArguments(
   unavailable: boolean;
 }> {
   const [bullResult, bearResult] = await Promise.allSettled([
-    deps.llm.argue("bull", evidence),
-    deps.llm.argue("bear", evidence),
+    Promise.resolve().then(() => deps.llm.argue("bull", evidence)),
+    Promise.resolve().then(() => deps.llm.argue("bear", evidence)),
   ]);
   if (bullResult.status !== "fulfilled" || bearResult.status !== "fulfilled") {
     return { arguments: fallbackArguments(), unavailable: true };
