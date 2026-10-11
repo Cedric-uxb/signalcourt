@@ -90,6 +90,24 @@ it("replay detects news changed to the article publisher even with fresh hashes"
   expect(replayReceipt(tampered).identical).toBe(false);
 });
 
+it.each(["ryo-1", "ryo-3", "ryo-4"])(
+  "replay detects invalid required data in %s even with fresh hashes",
+  async (evidenceId) => {
+    const receipt = await createAnalysisPipeline(
+      createDemoDependencies("supported"),
+    ).run(input);
+    const tampered = structuredClone(receipt);
+    const evidence = tampered.evidence.find(({ id }) => id === evidenceId)!;
+    (evidence.payload as { data: unknown }).data = null;
+    const { hash: _hash, ...partial } = evidence;
+    evidence.hash = sha256(partial);
+    tampered.replay.evidenceHash = sha256(tampered.evidence);
+
+    expect(receiptSchema.safeParse(tampered).success).toBe(true);
+    expect(replayReceipt(tampered).identical).toBe(false);
+  },
+);
+
 it.each([
   {
     name: "evidence payload",

@@ -127,10 +127,33 @@ const ryoEvidencePayloadSchema = z.object({
   availability: jsonObjectSchema,
 }).strict();
 
-const tokenDataSchema = z.object({
-  market: z.object({ price_usd: z.number().positive() }),
-  technicals: z.object({ atr_14: z.number().positive() }),
+const marketOverviewDataSchema = z.object({
+  regime: z.string().trim().min(1),
+  fear_greed: z.number().finite().min(0).max(100).optional(),
 });
+const analyzeTokenDataSchema = z.object({
+  market: z.object({ price_usd: z.number().positive() }),
+  technicals: z.object({
+    atr_14: z.number().positive(),
+    rsi: z.number().finite().min(0).max(100).optional(),
+  }),
+});
+const deepAnalysisDataSchema = z.object({
+  catalysts: z.array(z.string().trim().min(1)).max(50),
+  risks: z.array(z.string().trim().min(1)).max(50),
+  verdict: z.string().trim().min(1).optional(),
+});
+const sentimentShiftDataSchema = z.object({
+  direction: z.string().trim().min(1),
+  window: z.string().trim().min(1).optional(),
+  change: z.number().finite().optional(),
+});
+const ryoDataSchemas: Readonly<Record<string, z.ZodType>> = {
+  market_overview: marketOverviewDataSchema,
+  analyze_token: analyzeTokenDataSchema,
+  deep_analysis: deepAnalysisDataSchema,
+  monitor_market_sentiment_shift: sentimentShiftDataSchema,
+};
 
 const modelNameSchema = z.string().trim().min(1).max(200);
 const receiptIdSchema = z.string().trim().min(1).max(128);
@@ -332,6 +355,10 @@ function ryoAvailabilityIsUsable(tool: string, availability: JsonObject): boolea
   );
 }
 
+function validateRyoData(tool: string, data: unknown): boolean {
+  return ryoDataSchemas[tool]?.safeParse(data).success ?? false;
+}
+
 function unavailableRyoResult(
   request: RyoRequest,
   asOf: string,
@@ -375,6 +402,9 @@ async function collectRyoResults(
     }
 
     if (!requestContainsExpected(parsed.data.request, request.arguments)) {
+      return unavailableRyoResult(request, retrievedAt);
+    }
+    if (!validateRyoData(request.tool, parsed.data.data)) {
       return unavailableRyoResult(request, retrievedAt);
     }
 
@@ -567,6 +597,7 @@ function deriveMarketInputs(
       payload?.success &&
       requestContainsExpected(payload.data.request, request.arguments) &&
       ryoAvailabilityIsUsable(request.tool, payload.data.availability) &&
+      validateRyoData(request.tool, payload.data.data) &&
       ryoTimestampIsFresh(item.observedAt, decisionAt),
     );
     return { payload, usable };
@@ -574,7 +605,7 @@ function deriveMarketInputs(
 
   const tokenPayload = normalized[1]?.payload;
   const tokenData = tokenPayload?.success
-    ? tokenDataSchema.safeParse(tokenPayload.data.data)
+    ? analyzeTokenDataSchema.safeParse(tokenPayload.data.data)
     : null;
   return {
     marketEvidenceUsable:

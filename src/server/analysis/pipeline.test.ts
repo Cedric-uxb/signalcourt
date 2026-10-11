@@ -35,6 +35,26 @@ function usableAvailability(tool: string): Record<string, unknown> {
   );
 }
 
+function validRyoData(tool: string): unknown {
+  if (tool === "market_overview") {
+    return { regime: "neutral", fear_greed: 50 };
+  }
+  if (tool === "analyze_token") {
+    return {
+      market: { price_usd: 100 },
+      technicals: { atr_14: 5, rsi: 55 },
+    };
+  }
+  if (tool === "deep_analysis") {
+    return {
+      catalysts: ["regulated filing"],
+      risks: ["catalyst may be priced in"],
+      verdict: "constructive",
+    };
+  }
+  return { direction: "improving", window: "7d", change: 0.2 };
+}
+
 function ryoResult(tool: string): RyoResult {
   return {
     tool,
@@ -42,9 +62,7 @@ function ryoResult(tool: string): RyoResult {
     dataMode: "live",
     asOf: FIXED_TIME,
     request: ryoArguments(tool),
-    data: tool === "analyze_token"
-      ? { market: { price_usd: 100 }, technicals: { atr_14: 5 } }
-      : { available: true },
+    data: validRyoData(tool),
     availability: usableAvailability(tool),
     summary: `${tool} available`,
     warnings: [],
@@ -601,10 +619,109 @@ it("preserves validated RYO request, data, and availability provenance", async (
 
   expect(tokenEvidence?.payload).toEqual({
     request: { symbol: "SOL", endpoint: "fixture" },
-    data: { market: { price_usd: 100 }, technicals: { atr_14: 5 } },
+    data: {
+      market: { price_usd: 100 },
+      technicals: { atr_14: 5, rsi: 55 },
+    },
     availability: { market: "available", technicals: "available" },
   });
   expect(receipt.verdict).toBe("LONG");
+});
+
+const invalidRyoDataCases = [
+  ["market_overview", "null", null],
+  ["market_overview", "empty object", {}],
+  ["market_overview", "missing regime", { fear_greed: 50 }],
+  ["analyze_token", "null", null],
+  ["analyze_token", "empty object", {}],
+  [
+    "analyze_token",
+    "missing technicals",
+    { market: { price_usd: 100 } },
+  ],
+  ["deep_analysis", "null", null],
+  ["deep_analysis", "empty object", {}],
+  ["deep_analysis", "missing risks", { catalysts: ["filing"] }],
+  ["monitor_market_sentiment_shift", "null", null],
+  ["monitor_market_sentiment_shift", "empty object", {}],
+  [
+    "monitor_market_sentiment_shift",
+    "missing direction",
+    { window: "7d", change: 0.2 },
+  ],
+] as const;
+
+it.each(invalidRyoDataCases)(
+  "fails closed when %s data is %s",
+  async (failedTool, _name, data) => {
+    const dependencies = makeDependencies({
+      ryo: {
+        call: vi.fn(async (tool: string) => tool === failedTool
+          ? { ...ryoResult(tool), data }
+          : ryoResult(tool)),
+      },
+    });
+
+    const receipt = await createAnalysisPipeline(dependencies).run(rawInput);
+    const failedEvidence = receipt.evidence.find(
+      ({ source }) => source === failedTool,
+    );
+
+    expect(receipt.verdict).toBe("NO_TRADE");
+    expect(receipt.reasonCodes).toContain("MARKET_DATA_UNAVAILABLE");
+    expect(failedEvidence).toMatchObject({
+      status: "unavailable",
+      dataMode: "unknown",
+    });
+  },
+);
+
+it.each([
+  ["blank market regime", "market_overview", { regime: "   " }],
+  [
+    "blank deep-analysis array item",
+    "deep_analysis",
+    { catalysts: ["valid", "   "], risks: ["risk"] },
+  ],
+  [
+    "blank sentiment direction",
+    "monitor_market_sentiment_shift",
+    { direction: "   " },
+  ],
+] as const)("blocks %s", async (_name, failedTool, data) => {
+  const dependencies = makeDependencies({
+    ryo: {
+      call: vi.fn(async (tool: string) => tool === failedTool
+        ? { ...ryoResult(tool), data }
+        : ryoResult(tool)),
+    },
+  });
+
+  const receipt = await createAnalysisPipeline(dependencies).run(rawInput);
+
+  expect(receipt.verdict).toBe("NO_TRADE");
+  expect(receipt.reasonCodes).toContain("MARKET_DATA_UNAVAILABLE");
+  expect(receipt.evidence.find(({ source }) => source === failedTool))
+    .toMatchObject({ status: "unavailable", dataMode: "unknown" });
+});
+
+it("allows extra fields in every valid RYO data result", async () => {
+  const dependencies = makeDependencies({
+    ryo: {
+      call: vi.fn(async (tool: string) => ({
+        ...ryoResult(tool),
+        data: {
+          ...(validRyoData(tool) as Record<string, unknown>),
+          vendor_extension: { source: "fixture" },
+        },
+      })),
+    },
+  });
+
+  const receipt = await createAnalysisPipeline(dependencies).run(rawInput);
+
+  expect(receipt.verdict).toBe("LONG");
+  expect(replayReceipt(receipt).identical).toBe(true);
 });
 
 it.each([
