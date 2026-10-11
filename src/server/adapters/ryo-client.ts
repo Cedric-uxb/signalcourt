@@ -12,13 +12,13 @@ const resultSchema = z.object({
   status: z.enum(["ok", "partial", "unavailable"]),
   data_mode: z.enum(["live", "mixed", "simulated", "unknown"]),
   as_of: z.iso.datetime({ offset: true }),
-  request: z.json(),
+  request: jsonObjectSchema,
   data: z.json(),
-  summary: z.object({ headline: z.string().trim().min(1) }),
-  availability: z.json(),
+  summary: z.object({ headline: z.string().trim().min(1) }).strict(),
+  availability: jsonObjectSchema,
   warnings: z.array(z.string()),
-});
-const callResponseSchema = z.object({ result: resultSchema });
+}).strict();
+const callResponseSchema = z.object({ result: resultSchema }).strict();
 
 class ResponseTooLargeError extends Error {
   constructor() {
@@ -27,12 +27,14 @@ class ResponseTooLargeError extends Error {
 }
 
 type Sleep = (milliseconds: number) => Promise<void>;
+type Now = () => number;
 
 type Options = {
   baseUrl: string;
   apiKey: string;
   fetchImpl?: typeof fetch;
   sleepImpl?: Sleep;
+  nowImpl?: Now;
 };
 
 type CancelableBody = {
@@ -75,11 +77,23 @@ async function safeCancelBody(body: CancelableBody | null, reason?: unknown): Pr
   }
 }
 
-function retryDelayMilliseconds(retryAfter: string | null, retryIndex: number): number {
+function retryDelayMilliseconds(
+  retryAfter: string | null,
+  retryIndex: number,
+  nowImpl: Now,
+): number {
   const normalized = retryAfter?.trim();
-  if (normalized !== undefined && /^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(normalized)) {
-    const serverDelay = Number(normalized) * 1_000;
-    if (Number.isFinite(serverDelay)) return Math.min(serverDelay, RETRY_AFTER_CAP_MS);
+  if (normalized !== undefined) {
+    if (/^(?:0|[1-9]\d*)$/.test(normalized)) {
+      return Math.min(Number(normalized) * 1_000, RETRY_AFTER_CAP_MS);
+    }
+
+    if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(normalized)) {
+      const retryAt = Date.parse(normalized);
+      if (!Number.isNaN(retryAt)) {
+        return Math.min(Math.max(0, retryAt - nowImpl()), RETRY_AFTER_CAP_MS);
+      }
+    }
   }
   return 100 * 2 ** retryIndex;
 }
@@ -145,6 +159,7 @@ export function createRyoClient({
   apiKey,
   fetchImpl = fetch,
   sleepImpl = defaultSleep,
+  nowImpl = Date.now,
 }: Options) {
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
   const normalizedApiKey = apiKey.trim();
@@ -166,7 +181,9 @@ export function createRyoClient({
       if (!retryable || attempt === MAX_ATTEMPTS - 1) return response;
 
       await safeCancelBody(response.body);
-      await sleepImpl(retryDelayMilliseconds(response.headers.get("retry-after"), attempt));
+      await sleepImpl(
+        retryDelayMilliseconds(response.headers.get("retry-after"), attempt, nowImpl),
+      );
     }
 
     throw new Error("RYO request failed");

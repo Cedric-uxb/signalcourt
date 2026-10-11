@@ -89,12 +89,17 @@ function cancelTrackedStream(
   return { stream, cancelSpy };
 }
 
-function clientWith(fetchImpl: typeof fetch, sleepImpl = vi.fn(async (_ms: number) => {})) {
+function clientWith(
+  fetchImpl: typeof fetch,
+  sleepImpl = vi.fn(async (_ms: number) => {}),
+  nowImpl?: () => number,
+) {
   return createRyoClient({
     baseUrl: "https://api.example.test/mcp///",
     apiKey: `  ${["fixture", "credential"].join("-")}  `,
     fetchImpl,
     sleepImpl,
+    ...(nowImpl ? { nowImpl } : {}),
   });
 }
 
@@ -264,12 +269,32 @@ describe("RYO call normalization", () => {
   });
 
   it.each([
+    ["top-level", (payload: ReturnType<typeof validPayload>) => Object.assign(payload, { extra: true })],
+    ["result", (payload: ReturnType<typeof validPayload>) => Object.assign(payload.result, { extra: true })],
+    [
+      "summary",
+      (payload: ReturnType<typeof validPayload>) =>
+        Object.assign(payload.result.summary, { extra: true }),
+    ],
+  ])("rejects an unknown %s response field", async (_location, mutate) => {
+    const payload = validPayload();
+    mutate(payload);
+    const fetchImpl = vi.fn(async () => jsonResponse(payload));
+
+    await expect(clientWith(fetchImpl).call("analyze_token", {})).rejects.toThrow(
+      /response schema/i,
+    );
+  });
+
+  it.each([
     ["status", { status: "success" }],
     ["data mode", { data_mode: "fresh" }],
     ["date", { as_of: "October 8" }],
     ["warnings", { warnings: ["first", 2] }],
     ["headline", { summary: { headline: "   " } }],
+    ["request scalar", { request: "SOL" }],
     ["data", { data: undefined }],
+    ["availability scalar", { availability: "available" }],
     ["availability", { availability: undefined }],
   ])("rejects invalid result schema: %s", async (_name, change) => {
     const payload = validPayload();
@@ -311,6 +336,42 @@ describe("RYO bounded retries", () => {
     await clientWith(fetchImpl, sleepImpl).call("analyze_token", {});
 
     expect(sleepImpl.mock.calls.map(([milliseconds]) => milliseconds)).toEqual([0, 5_000]);
+  });
+
+  it.each([
+    ["future date above cap", 10_000, 5_000],
+    ["future date under cap", 3_000, 3_000],
+    ["past date", -1_000, 0],
+  ])("uses Retry-After HTTP-date for %s", async (_name, offsetMs, expectedDelay) => {
+    const now = Date.parse("2026-10-11T12:00:00.000Z");
+    const responses = [
+      new Response(null, {
+        status: 503,
+        headers: { "retry-after": new Date(now + offsetMs).toUTCString() },
+      }),
+      jsonResponse(validPayload()),
+    ];
+    const fetchImpl = vi.fn(async () => responses.shift()!);
+    const sleepImpl = vi.fn(async (_ms: number) => {});
+
+    await clientWith(fetchImpl, sleepImpl, () => now).call("analyze_token", {});
+
+    expect(sleepImpl).toHaveBeenCalledOnce();
+    expect(sleepImpl).toHaveBeenCalledWith(expectedDelay);
+  });
+
+  it("falls back to exponential delay for fractional Retry-After seconds", async () => {
+    const responses = [
+      new Response(null, { status: 429, headers: { "retry-after": "0.5" } }),
+      new Response(null, { status: 503, headers: { "retry-after": "1.25" } }),
+      jsonResponse(validPayload()),
+    ];
+    const fetchImpl = vi.fn(async () => responses.shift()!);
+    const sleepImpl = vi.fn(async (_ms: number) => {});
+
+    await clientWith(fetchImpl, sleepImpl).call("analyze_token", {});
+
+    expect(sleepImpl.mock.calls.map(([milliseconds]) => milliseconds)).toEqual([100, 200]);
   });
 
   it("falls back to exponential delay for invalid Retry-After values", async () => {
