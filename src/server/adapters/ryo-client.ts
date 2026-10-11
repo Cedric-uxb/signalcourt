@@ -84,8 +84,11 @@ function retryDelayMilliseconds(
 ): number {
   const normalized = retryAfter?.trim();
   if (normalized !== undefined) {
-    if (/^(?:0|[1-9]\d*)$/.test(normalized)) {
-      return Math.min(Number(normalized) * 1_000, RETRY_AFTER_CAP_MS);
+    if (/^[0-9]+$/.test(normalized)) {
+      const delaySeconds = Number(normalized);
+      if (Number.isFinite(delaySeconds)) {
+        return Math.min(delaySeconds * 1_000, RETRY_AFTER_CAP_MS);
+      }
     }
 
     if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(normalized)) {

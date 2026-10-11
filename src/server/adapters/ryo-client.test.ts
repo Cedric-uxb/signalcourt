@@ -338,6 +338,20 @@ describe("RYO bounded retries", () => {
     expect(sleepImpl.mock.calls.map(([milliseconds]) => milliseconds)).toEqual([0, 5_000]);
   });
 
+  it("accepts Retry-After delay-seconds with leading zeros", async () => {
+    const responses = [
+      new Response(null, { status: 503, headers: { "retry-after": "001" } }),
+      jsonResponse(validPayload()),
+    ];
+    const fetchImpl = vi.fn(async () => responses.shift()!);
+    const sleepImpl = vi.fn(async (_ms: number) => {});
+
+    await clientWith(fetchImpl, sleepImpl).call("analyze_token", {});
+
+    expect(sleepImpl).toHaveBeenCalledOnce();
+    expect(sleepImpl).toHaveBeenCalledWith(1_000);
+  });
+
   it.each([
     ["future date above cap", 10_000, 5_000],
     ["future date under cap", 3_000, 3_000],
