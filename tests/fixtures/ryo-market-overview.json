@@ -1,0 +1,21 @@
+{
+  "result": {
+    "schema_version": "1",
+    "tool": "market_overview",
+    "status": "ok",
+    "data_mode": "simulated",
+    "as_of": "2026-10-08T12:00:00.000Z",
+    "request": {},
+    "data": {
+      "regime": "neutral",
+      "fear_greed": 52
+    },
+    "summary": {
+      "headline": "Demo market regime is neutral"
+    },
+    "availability": {
+      "market": "available"
+    },
+    "warnings": []
+  }
+}
