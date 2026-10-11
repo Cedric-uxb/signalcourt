@@ -141,6 +141,7 @@ it("canonicalizes source URLs before comparing publishers", () => {
   )).toBe("https://example.com/news?a=1&b=2");
   expect(publisherKey("https://www.news.Example.com/story")).toBe("example.com");
   expect(publisherKey("https://news.bbc.co.uk/story")).toBe("bbc.co.uk");
+  expect(publisherKey("https://foo.blogspot.com/story")).toBe("foo.blogspot.com");
   expect(publisherKey("https://192.0.2.10/story")).toBeNull();
   expect(publisherKey("http://localhost/story")).toBeNull();
 });
@@ -317,6 +318,63 @@ it("uses the PSL to keep distinct registered co.uk publishers", async () => {
     "https://news.bbc.co.uk/story",
     "https://www.independent.co.uk/story",
   ]);
+});
+
+it("keeps distinct registered publishers on a private suffix", async () => {
+  const dependencies = makeDependencies({
+    newsSearcher: vi.fn(async () => [{
+      title: "Independent blog report",
+      url: "https://bar.blogspot.com/story",
+      excerpt: "Independent report excerpt.",
+    }]),
+    publisherRegistry: {
+      "foo.blogspot.com": "foo-publisher",
+      "bar.blogspot.com": "bar-publisher",
+    },
+  });
+
+  const receipt = await createAnalysisPipeline(dependencies).run({
+    ...rawInput,
+    articleUrl: "https://foo.blogspot.com/news",
+  });
+  const article = receipt.evidence.find(({ kind }) => kind === "article");
+
+  expect(receipt.verdict).toBe("LONG");
+  expect(article?.payload).toMatchObject({
+    publisher: { domain: "foo.blogspot.com", id: "foo-publisher" },
+  });
+  expect(receipt.evidence.filter(({ kind }) => kind === "news"))
+    .toHaveLength(1);
+});
+
+it("filters private-suffix domains registered to the same publisher", async () => {
+  const verifyClaims = vi.fn(async () => [verification("claim-1")]);
+  const dependencies = makeDependencies({
+    newsSearcher: vi.fn(async () => [{
+      title: "Related blog report",
+      url: "https://bar.blogspot.com/story",
+      excerpt: "Related report excerpt.",
+    }]),
+    publisherRegistry: {
+      "foo.blogspot.com": "shared-publisher",
+      "bar.blogspot.com": "shared-publisher",
+    },
+    llm: { ...makeDependencies().llm, verifyClaims },
+  });
+
+  const receipt = await createAnalysisPipeline(dependencies).run({
+    ...rawInput,
+    articleUrl: "https://foo.blogspot.com/news",
+  });
+  const article = receipt.evidence.find(({ kind }) => kind === "article");
+
+  expect(article?.payload).toMatchObject({
+    publisher: { domain: "foo.blogspot.com", id: "shared-publisher" },
+  });
+  expect(receipt.verdict).toBe("NO_TRADE");
+  expect(receipt.evidence.filter(({ kind }) => kind === "news"))
+    .toHaveLength(0);
+  expect(verifyClaims).not.toHaveBeenCalled();
 });
 
 it("deduplicates cross-domain news with the same registered publisher id", async () => {

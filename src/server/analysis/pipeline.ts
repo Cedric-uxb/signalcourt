@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { getDomain } from "tldts";
 import { z } from "zod";
 import {
   analysisRequestSchema,
   bearArgumentSchema,
   bullArgumentSchema,
+  currentReceiptSchema,
   receiptSchema,
   type Argument,
   type Claim,
@@ -15,6 +15,7 @@ import type { ReasonCode } from "../../shared/reason-codes.js";
 import { canonicalJson, sha256 } from "../domain/canonical-json.js";
 import { validateCitations } from "../domain/citations.js";
 import { decide } from "../domain/decision.js";
+import { registrablePublisherDomain } from "../domain/publisher-domain.js";
 import { promptVersion } from "./prompts.js";
 
 type ExtractedClaim = { id: string; text: string };
@@ -216,7 +217,9 @@ export function canonicalizeSourceUrl(rawUrl: string): string {
 }
 
 export function publisherKey(rawUrl: string): string | null {
-  return getDomain(canonicalizeSourceUrl(rawUrl));
+  return registrablePublisherDomain(
+    new URL(canonicalizeSourceUrl(rawUrl)).hostname,
+  );
 }
 
 function registeredPublisherIdentity(
@@ -852,11 +855,10 @@ export function replayReceipt(rawReceipt: unknown): {
       receipt.claims,
       receipt.arguments,
     );
-    const identical =
+    const replayMatches =
       evidenceHashesAreValid(receipt.evidence) &&
       claimsReferenceNews(receipt.claims, receipt.evidence) &&
       receipt.replay.evidenceHash === evidenceHash &&
-      receipt.replay.receiptHash === receiptHash &&
       canonicalJson({
         verdict: receipt.verdict,
         confidence: receipt.confidence,
@@ -867,6 +869,9 @@ export function replayReceipt(rawReceipt: unknown): {
         ...expectedDecision,
         causalChain: expectedCausalChain,
       });
+    const identical = replayMatches &&
+      receipt.replay.receiptHash !== undefined &&
+      receipt.replay.receiptHash === receiptHash;
     return { evidenceHash, identical };
   } catch {
     return { evidenceHash, identical: false };
@@ -1102,8 +1107,8 @@ export function createAnalysisPipeline(deps: AnalysisDependencies) {
         debate.arguments,
       );
       const evidenceHash = sha256(evidence);
-      const candidate = receiptSchema.parse({
-        schemaVersion: "1.0",
+      const candidate = currentReceiptSchema.parse({
+        schemaVersion: "1.1",
         id: generateReceiptId(deps),
         createdAt: retrievedAt,
         input,
@@ -1120,12 +1125,12 @@ export function createAnalysisPipeline(deps: AnalysisDependencies) {
         },
       });
       const receiptHash = sha256(receiptIntegrityPayload(candidate));
-      const withIntegrity = receiptSchema.parse({
+      const withIntegrity = currentReceiptSchema.parse({
         ...candidate,
         replay: { ...candidate.replay, receiptHash },
       });
       const replay = replayReceipt(withIntegrity);
-      return receiptSchema.parse({
+      return currentReceiptSchema.parse({
         ...withIntegrity,
         replay: { ...withIntegrity.replay, ...replay },
       });

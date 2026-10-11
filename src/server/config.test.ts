@@ -109,6 +109,21 @@ describe("readConfig", () => {
     expect(config.publisherRegistryConfigured).toBe(true);
   });
 
+  it("accepts distinct registrable private domains", () => {
+    const config = readConfig({
+      PUBLISHER_REGISTRY_JSON: JSON.stringify({
+        "foo.blogspot.com": "publisher-a",
+        "bar.blogspot.com": "publisher-b",
+      }),
+    });
+
+    expect(config.publisherRegistry).toEqual({
+      "foo.blogspot.com": "publisher-a",
+      "bar.blogspot.com": "publisher-b",
+    });
+    expect(config.publisherRegistryConfigured).toBe(true);
+  });
+
   it("reports partial configuration by field name without exposing values", () => {
     const sentinel = "partial-secret-value";
     const config = readConfig({

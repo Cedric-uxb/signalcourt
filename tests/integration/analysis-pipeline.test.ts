@@ -36,6 +36,7 @@ it("creates a replayable supported simulated decision receipt offline", async ()
 
   expect(receiptSchema.safeParse(receipt).success).toBe(true);
   expect(receipt).toMatchObject({
+    schemaVersion: "1.1",
     id: "demo-supported",
     createdAt: "2026-10-08T12:00:00.000Z",
     input: { ...input, token: "SOL" },
@@ -83,6 +84,50 @@ it("requires a stored full receipt integrity hash for replay", async () => {
   expect(replayReceipt({ ...receipt, replay: incompleteReplay })).toEqual({
     evidenceHash: "",
     identical: false,
+  });
+});
+
+it("replays a legacy receipt without a full hash but cannot prove identity", async () => {
+  const current = await createAnalysisPipeline(
+    createDemoDependencies("supported"),
+  ).run(input);
+  const { receiptHash: _receiptHash, ...legacyReplay } = current.replay;
+  const legacy = receiptSchema.parse({
+    ...current,
+    schemaVersion: "1.0",
+    replay: legacyReplay,
+  });
+
+  expect(replayReceipt(legacy)).toEqual({
+    evidenceHash: current.replay.evidenceHash,
+    identical: false,
+  });
+});
+
+it("fully replays a legacy receipt that stored a valid full hash", async () => {
+  const current = await createAnalysisPipeline(
+    createDemoDependencies("supported"),
+  ).run(input);
+  const legacy = receiptSchema.parse({
+    ...current,
+    schemaVersion: "1.0",
+    replay: {
+      ...current.replay,
+      receiptHash: "0".repeat(64),
+      identical: false,
+    },
+  });
+  const withHash = receiptSchema.parse({
+    ...legacy,
+    replay: {
+      ...legacy.replay,
+      receiptHash: sha256(receiptIntegrityPayload(legacy)),
+    },
+  });
+
+  expect(replayReceipt(withHash)).toEqual({
+    evidenceHash: current.replay.evidenceHash,
+    identical: true,
   });
 });
 

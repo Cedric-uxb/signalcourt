@@ -68,8 +68,18 @@ function receiptFixture(overrides: Partial<Receipt> = {}): Receipt {
     },
     createdAt: "2026-10-11T12:00:00.000Z",
     id: "receipt-1",
-    schemaVersion: "1.0",
+    schemaVersion: "1.1",
     ...overrides,
+  });
+}
+
+function legacyReceiptFixture(): Receipt {
+  const current = receiptFixture();
+  const { receiptHash: _receiptHash, ...replay } = current.replay;
+  return receiptSchema.parse({
+    ...current,
+    schemaVersion: "1.0",
+    replay,
   });
 }
 
@@ -210,6 +220,45 @@ describe("receipt repository", () => {
 
       expect(repository.findById(receipt.id)).toEqual(receipt);
       expect(repository.findById("missing-receipt")).toBeNull();
+    } finally {
+      db.close();
+    }
+  });
+
+  it("stores and returns a legacy receipt without changing its payload", () => {
+    const db = openDatabase(":memory:");
+    const repository = createReceiptRepository(db);
+    const receipt = legacyReceiptFixture();
+
+    try {
+      repository.insert(receipt);
+
+      expect(repository.findById(receipt.id)).toEqual(receipt);
+      const payload = db
+        .prepare("SELECT payload FROM receipts WHERE id = ?")
+        .pluck()
+        .get(receipt.id);
+      expect(payload).toBe(canonicalJson(receipt));
+    } finally {
+      db.close();
+    }
+  });
+
+  it("reads an existing legacy payload without rewriting it", () => {
+    const db = openDatabase(":memory:");
+    const repository = createReceiptRepository(db);
+    const receipt = legacyReceiptFixture();
+    const originalPayload = JSON.stringify(receipt);
+
+    try {
+      db.prepare(
+        "INSERT INTO receipts (id, created_at, payload) VALUES (?, ?, ?)",
+      ).run(receipt.id, receipt.createdAt, originalPayload);
+
+      expect(repository.findById(receipt.id)).toEqual(receipt);
+      expect(db.prepare("SELECT payload FROM receipts WHERE id = ?")
+        .pluck()
+        .get(receipt.id)).toBe(originalPayload);
     } finally {
       db.close();
     }

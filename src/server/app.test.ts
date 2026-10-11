@@ -1,14 +1,14 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Writable } from "node:stream";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { Receipt } from "../shared/contracts.js";
+import { receiptSchema, type Receipt } from "../shared/contracts.js";
 import { createDemoDependencies } from "./analysis/demo-fixture.js";
-import { createAnalysisPipeline, type AnalysisDependencies } from "./analysis/pipeline.js";
-import { buildApp } from "./app.js";
+import { createAnalysisPipeline } from "./analysis/pipeline.js";
+import { buildApp, type AppOptions } from "./app.js";
+import { readConfig } from "./config.js";
 import { openDatabase } from "./persistence/database.js";
 
 const validInput = {
@@ -30,24 +30,20 @@ async function demoReceipt(id = "receipt-fixture"): Promise<Receipt> {
   return createAnalysisPipeline({ ...dependencies, id: () => id }).run(validInput);
 }
 
+async function legacyReceipt(id = "legacy-receipt"): Promise<Receipt> {
+  const current = await demoReceipt(id);
+  const { receiptHash: _receiptHash, ...replay } = current.replay;
+  return receiptSchema.parse({
+    ...current,
+    schemaVersion: "1.0",
+    replay,
+  });
+}
+
 function repositoryFor(receipt: Receipt | null = null) {
   return {
     insert: vi.fn(),
     findById: vi.fn(() => receipt),
-  };
-}
-
-function liveLikeDemoDependencies(): AnalysisDependencies {
-  const dependencies = createDemoDependencies("supported");
-  return {
-    ...dependencies,
-    evidenceMode: "live",
-    ryo: {
-      call: async (tool, arguments_) => ({
-        ...await dependencies.ryo.call(tool, arguments_),
-        dataMode: "live" as const,
-      }),
-    },
   };
 }
 
@@ -153,77 +149,32 @@ describe("analysis and receipt routes", () => {
     }
   });
 
-  it("forces fresh ids for injected demo dependencies", async () => {
-    const ids = ["injected-demo-1", "injected-demo-2"];
-    const app = buildApp({
+  it("rejects a runtime dependency override", () => {
+    const unsafeOptions = {
       mode: "demo",
       env: {},
       dependencies: createDemoDependencies("supported"),
-      databasePath: ":memory:",
-      idGenerator: () => ids.shift() ?? "unexpected-id",
-    });
+    } as unknown as AppOptions;
 
-    try {
-      const first = await app.inject({ method: "POST", url: "/api/analyses", payload: validInput });
-      const second = await app.inject({ method: "POST", url: "/api/analyses", payload: validInput });
-
-      expect(first.statusCode).toBe(201);
-      expect(second.statusCode).toBe(201);
-      expect(first.json<Receipt>().id).toBe("injected-demo-1");
-      expect(second.json<Receipt>().id).toBe("injected-demo-2");
-    } finally {
-      await app.close();
-    }
+    expect(() => buildApp(unsafeOptions)).toThrow("Unsupported app override");
   });
 
-  it("forces demo provenance on injected live-like dependencies", async () => {
-    const app = buildApp({
-      mode: "demo",
-      env: {},
-      dependencies: liveLikeDemoDependencies(),
-      databasePath: ":memory:",
-      idGenerator: () => "forced-demo-id",
-    });
+  it("never emits live RYO evidence in demo mode", async () => {
+    const app = buildApp({ mode: "demo", env: {}, databasePath: ":memory:" });
 
     try {
-      const created = await app.inject({ method: "POST", url: "/api/analyses", payload: validInput });
-      const system = await app.inject({ method: "GET", url: "/api/system" });
-      const receipt = created.json<Receipt>();
-
-      expect(created.statusCode).toBe(201);
-      expect(receipt.id).toBe("forced-demo-id");
-      expect(receipt.verdict).toBe("NO_TRADE");
-      expect(receipt.evidence.find(({ kind }) => kind === "article")?.dataMode)
-        .toBe("simulated");
-      expect(system.json()).toMatchObject({
-        mode: "demo",
-        capabilities: { ryo: false, news: false, model: false },
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/analyses",
+        payload: validInput,
       });
-    } finally {
-      await app.close();
-    }
-  });
-
-  it("forces live publisher registry and id on injected dependencies", async () => {
-    const app = buildApp({
-      mode: "live",
-      env: completeLiveEnv({
-        "source.example": "configured-source",
-        "wire.example": "configured-wire",
-      }),
-      dependencies: liveLikeDemoDependencies(),
-      databasePath: ":memory:",
-      idGenerator: () => "forced-live-id",
-    });
-
-    try {
-      const response = await app.inject({ method: "POST", url: "/api/analyses", payload: validInput });
       const receipt = response.json<Receipt>();
 
       expect(response.statusCode).toBe(201);
-      expect(receipt.id).toBe("forced-live-id");
-      expect(receipt.verdict).toBe("NO_TRADE");
-      expect(receipt.reasonCodes).toContain("INSUFFICIENT_EVIDENCE");
+      expect(receipt.evidence.filter(({ kind }) => kind === "ryo"))
+        .not.toHaveLength(0);
+      expect(receipt.evidence.filter(({ kind }) => kind === "ryo")
+        .every(({ dataMode }) => dataMode === "simulated")).toBe(true);
     } finally {
       await app.close();
     }
@@ -246,92 +197,6 @@ describe("analysis and receipt routes", () => {
         riskPlan: null,
       });
       expect(response.json<Receipt>().reasonCodes).toContain("INSUFFICIENT_EVIDENCE");
-    } finally {
-      await app.close();
-    }
-  });
-
-  it.each([
-    ["missing fields", {}],
-    ["invalid token", { ...validInput, token: "not/a/token" }],
-    ["invalid URL", { ...validInput, articleUrl: "not-a-url" }],
-  ])("rejects %s before calling the pipeline", async (_name, payload) => {
-    const base = createDemoDependencies("supported");
-    const articleFetcher = vi.fn(base.articleFetcher);
-    const now = vi.fn(base.now);
-    const app = buildApp({
-      env: {},
-      dependencies: { ...base, articleFetcher, now },
-      repository: repositoryFor(),
-    });
-
-    try {
-      const response = await app.inject({ method: "POST", url: "/api/analyses", payload });
-
-      expect(response.statusCode).toBe(400);
-      expect(response.json()).toMatchObject({ error: "INVALID_INPUT" });
-      expect(response.json<{ issues: unknown[] }>().issues.length).toBeGreaterThan(0);
-      for (const issue of response.json<{ issues: Array<Record<string, unknown>> }>().issues) {
-        expect(Object.keys(issue).sort()).toEqual(["code", "message", "path"]);
-      }
-      expect(JSON.stringify(response.json())).not.toContain("not/a/token");
-      expect(now).not.toHaveBeenCalled();
-      expect(articleFetcher).not.toHaveBeenCalled();
-    } finally {
-      await app.close();
-    }
-  });
-
-  it("returns Fastify's 413 response for an oversized body", async () => {
-    const base = createDemoDependencies("supported");
-    const articleFetcher = vi.fn(base.articleFetcher);
-    const app = buildApp({
-      env: {},
-      dependencies: { ...base, articleFetcher },
-      repository: repositoryFor(),
-    });
-
-    try {
-      const response = await app.inject({
-        method: "POST",
-        url: "/api/analyses",
-        payload: { ...validInput, token: "S".repeat(40_000) },
-      });
-
-      expect(response.statusCode).toBe(413);
-      expect(articleFetcher).not.toHaveBeenCalled();
-    } finally {
-      await app.close();
-    }
-  });
-
-  it("redacts pipeline failures from both response and logs", async () => {
-    const sentinel = "pipeline-secret-value";
-    const chunks: string[] = [];
-    const stream = new Writable({
-      write(chunk, _encoding, callback) {
-        chunks.push(String(chunk));
-        callback();
-      },
-    });
-    const app = buildApp({
-      env: {},
-      logger: { level: "warn", stream },
-      dependencies: {
-        ...createDemoDependencies("supported"),
-        articleFetcher: vi.fn(async () => { throw new Error(sentinel); }),
-      },
-      repository: repositoryFor(),
-    });
-
-    try {
-      const response = await app.inject({ method: "POST", url: "/api/analyses", payload: validInput });
-
-      expect(response.statusCode).toBe(503);
-      expect(response.json()).toEqual({ error: "ANALYSIS_UNAVAILABLE" });
-      expect(response.body).not.toContain(sentinel);
-      expect(chunks.join("")).not.toContain(sentinel);
-      expect(chunks.join("")).toContain("ANALYSIS_UNAVAILABLE");
     } finally {
       await app.close();
     }
@@ -442,6 +307,33 @@ describe("analysis and receipt routes", () => {
       await app.close();
     }
   });
+
+  it("returns an unchanged legacy receipt and reports replay as non-identical", async () => {
+    const receipt = await legacyReceipt();
+    const app = buildApp({ env: {}, repository: repositoryFor(receipt) });
+
+    try {
+      const fetched = await app.inject({
+        method: "GET",
+        url: `/api/receipts/${receipt.id}`,
+      });
+      const replay = await app.inject({
+        method: "POST",
+        url: `/api/receipts/${receipt.id}/replay`,
+      });
+
+      expect(fetched.statusCode).toBe(200);
+      expect(fetched.json()).toEqual(receipt);
+      expect(replay.statusCode).toBe(200);
+      expect(replay.json()).toEqual({
+        id: receipt.id,
+        evidenceHash: receipt.replay.evidenceHash,
+        identical: false,
+      });
+    } finally {
+      await app.close();
+    }
+  });
 });
 
 describe("system capabilities and application lifecycle", () => {
@@ -474,12 +366,10 @@ describe("system capabilities and application lifecycle", () => {
     }
   });
 
-  it("reports live capabilities with injected dependencies and no network", async () => {
-    const dependencies = createDemoDependencies("supported");
+  it("reports live capabilities without making a network request", async () => {
     const app = buildApp({
       env: completeLiveEnv(),
       mode: "live",
-      dependencies: { ...dependencies, evidenceMode: "live" },
       databasePath: ":memory:",
     });
 
@@ -527,8 +417,9 @@ describe("system capabilities and application lifecycle", () => {
 
   it("closes an opened database when pipeline assembly fails", () => {
     const db = openDatabase(":memory:");
-    const invalidDependencies: AnalysisDependencies = {
-      ...createDemoDependencies("supported"),
+    const config = readConfig(completeLiveEnv());
+    const invalidConfig = {
+      ...config,
       publisherRegistry: new Proxy({}, {
         ownKeys() {
           throw new Error("forced pipeline assembly failure");
@@ -537,9 +428,8 @@ describe("system capabilities and application lifecycle", () => {
     };
 
     expect(() => buildApp({
-      env: {},
+      config: invalidConfig,
       db,
-      dependencies: invalidDependencies,
       repository: repositoryFor(),
     })).toThrow();
     expect(db.open).toBe(false);

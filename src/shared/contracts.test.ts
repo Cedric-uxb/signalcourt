@@ -31,7 +31,7 @@ const bearArgument = {
 };
 
 const receipt = {
-  schemaVersion: "1.0" as const,
+  schemaVersion: "1.1" as const,
   id: "receipt-1",
   createdAt: "2026-10-11T12:00:00.000Z",
   input: {
@@ -88,11 +88,21 @@ describe("receiptSchema", () => {
     ).toBe(false);
   });
 
-  it("accepts arguments ordered bull then bear", () => {
+  it("accepts a current receipt with arguments ordered bull then bear", () => {
     expect(receiptSchema.safeParse(receipt).success).toBe(true);
   });
 
-  it("requires evidence and full receipt integrity hashes", () => {
+  it("accepts a legacy receipt without a full receipt hash", () => {
+    const { receiptHash: _receiptHash, ...legacyReplay } = receipt.replay;
+
+    expect(receiptSchema.safeParse({
+      ...receipt,
+      schemaVersion: "1.0",
+      replay: legacyReplay,
+    }).success).toBe(true);
+  });
+
+  it("requires evidence and full receipt integrity hashes for current receipts", () => {
     const { receiptHash: _receiptHash, ...replayWithoutReceiptHash } = receipt.replay;
 
     expect(receiptSchema.safeParse({

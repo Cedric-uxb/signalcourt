@@ -36,7 +36,7 @@ export type AppOptions = {
   env?: NodeJS.ProcessEnv;
   logger?: FastifyServerOptions["logger"];
   config?: ServerConfig;
-  dependencies?: AnalysisDependencies;
+  // Storage overrides do not alter the selected mode or analysis dependencies.
   repository?: ReceiptRepository;
   db?: Database.Database;
   idGenerator?: () => string;
@@ -75,31 +75,6 @@ function createLiveDependencies(config: ServerConfig): AnalysisDependencies {
   };
 }
 
-function bindAnalysisDependencies(
-  options: AppOptions,
-  mode: ServerMode,
-  config: ServerConfig,
-): AnalysisDependencies {
-  const demoDependencies = createDemoDependencies(
-    options.demoScenario ?? "supported",
-  );
-  const dependencies = options.dependencies ?? (mode === "demo"
-    ? demoDependencies
-    : createLiveDependencies(config));
-  const configuredDemoRegistry = Object.keys(config.publisherRegistry).length > 0
-    ? config.publisherRegistry
-    : demoDependencies.publisherRegistry;
-
-  return {
-    ...dependencies,
-    evidenceMode: mode === "demo" ? "simulated" : "live",
-    publisherRegistry: mode === "live"
-      ? config.publisherRegistry
-      : dependencies.publisherRegistry ?? configuredDemoRegistry,
-    id: options.idGenerator ?? randomUUID,
-  };
-}
-
 export function buildApp(options: AppOptions = {}) {
   let db = options.db;
   let databaseClosed = false;
@@ -111,6 +86,9 @@ export function buildApp(options: AppOptions = {}) {
   };
 
   try {
+    if (Object.prototype.hasOwnProperty.call(options, "dependencies")) {
+      throw new Error("Unsupported app override");
+    }
     const config = options.config ?? readConfig(options.env ?? process.env);
     const mode = options.mode ?? config.mode;
     if (mode === "live" && !config.liveReady) {
@@ -128,9 +106,13 @@ export function buildApp(options: AppOptions = {}) {
       repository = createReceiptRepository(db);
     }
 
-    const pipeline = createAnalysisPipeline(
-      bindAnalysisDependencies(options, mode, config),
-    );
+    const dependencies = mode === "demo"
+      ? createDemoDependencies(options.demoScenario ?? "supported")
+      : createLiveDependencies(config);
+    const pipeline = createAnalysisPipeline({
+      ...dependencies,
+      id: options.idGenerator ?? randomUUID,
+    });
 
     app.get("/api/health", async () => ({
       ok: true,

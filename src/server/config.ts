@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
-import { domainToASCII } from "node:url";
 
-import { getDomain } from "tldts";
+import {
+  canonicalDomainName,
+  registrablePublisherDomain,
+} from "./domain/publisher-domain.js";
 
 const CONFIG_ERROR = "Invalid server configuration";
 const ENV_ERROR = "Failed to load local environment";
@@ -100,9 +102,9 @@ function readHttpsUrl(value: string, optional: boolean): string | undefined {
 function normalizedPublisherDomain(rawDomain: string): string {
   if (/\s/.test(rawDomain) || /[\/:?#@\[\]]/.test(rawDomain)) invalidConfig();
   const withoutTrailingDot = rawDomain.replace(/\.+$/, "");
-  const asciiDomain = domainToASCII(withoutTrailingDot).toLowerCase();
+  const asciiDomain = canonicalDomainName(withoutTrailingDot);
   if (!asciiDomain || DANGEROUS_KEYS.has(asciiDomain)) invalidConfig();
-  const registrableDomain = getDomain(asciiDomain, { allowPrivateDomains: true });
+  const registrableDomain = registrablePublisherDomain(asciiDomain);
   if (!registrableDomain || registrableDomain !== asciiDomain) invalidConfig();
   return asciiDomain;
 }
