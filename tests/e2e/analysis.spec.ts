@@ -1,21 +1,29 @@
-import { mkdir } from "node:fs/promises";
-import path from "node:path";
-
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-import { createDemoDependencies } from "../../src/server/analysis/demo-fixture.js";
-import { createAnalysisPipeline } from "../../src/server/analysis/pipeline.js";
-
 const articleUrl = "https://example.com/sol-news";
-const screenshotDirectory = path.resolve("test-results/visual");
+const supportedBaseUrl = "http://127.0.0.1:5173";
+const insufficientBaseUrl = "http://127.0.0.1:5174";
 
-async function submitAnalysis(page: Page) {
-  await page.goto("/");
+type Verdict = "LONG" | "NO_TRADE";
+
+async function submitAnalysis(
+  page: Page,
+  options: { baseUrl?: string; verdict?: Verdict } = {},
+) {
+  const baseUrl = options.baseUrl ?? supportedBaseUrl;
+  const verdict = options.verdict ?? "LONG";
+  await page.goto(baseUrl);
   await page.getByLabel("News URL").fill(articleUrl);
   await page.getByLabel("Token symbol").fill("SOL");
   await page.getByLabel("Balanced").check();
+
+  const responsePromise = page.waitForResponse((response) =>
+    response.request().method() === "POST"
+      && new URL(response.url()).pathname === "/api/analyses",
+  );
   await page.getByRole("button", { name: "Analyze evidence" }).click();
-  await expect(page.getByRole("heading", { name: "LONG" })).toBeVisible();
+  expect((await responsePromise).status()).toBe(201);
+  await expect(page.getByRole("heading", { name: verdict })).toBeVisible();
 }
 
 async function expectNoHorizontalOverflow(page: Page) {
@@ -37,6 +45,44 @@ async function expectControlFits(control: Locator) {
   expect(fit).toEqual({ insideViewport: true, textFits: true });
 }
 
+async function expectPanelFits(panel: Locator, keyContent: Locator) {
+  await expect(panel).toBeVisible();
+  await expect(keyContent).toBeVisible();
+  const fit = await panel.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return {
+      insideViewport: rect.left >= 0 && rect.right <= window.innerWidth,
+      noInternalOverflow: element.scrollWidth <= element.clientWidth + 1,
+    };
+  });
+  expect(fit).toEqual({ insideViewport: true, noInternalOverflow: true });
+
+  const contentFit = await keyContent.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.left >= 0 && rect.right <= window.innerWidth;
+  });
+  expect(contentFit).toBe(true);
+}
+
+async function expectWorkspaceScreenshot(
+  page: Page,
+  name: string,
+  maskReceipt: boolean,
+) {
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+  await expect(page).toHaveScreenshot(name, {
+    animations: "disabled",
+    caret: "hide",
+    fullPage: true,
+    mask: maskReceipt
+      ? [page.locator(".receipt-id-row code"), page.locator(".receipt-panel time")]
+      : [],
+    maskColor: "#6b7280",
+    scale: "css",
+  });
+}
+
 test("creates and replays a supported practice decision", async ({ page }, testInfo) => {
   await submitAnalysis(page);
 
@@ -56,33 +102,25 @@ test("creates and replays a supported practice decision", async ({ page }, testI
 
   await page.getByRole("button", { name: "Replay receipt" }).click();
   await expect(page.getByText("Replay matched stored decision")).toBeVisible();
-
-  await mkdir(screenshotDirectory, { recursive: true });
-  await page.evaluate(() => window.scrollTo(0, 0));
-  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
-  await page.screenshot({
-    path: path.join(screenshotDirectory, `${testInfo.project.name}-success.png`),
-    fullPage: true,
-    animations: "disabled",
-  });
 });
 
-test("renders an evidence-insufficient decision without a practice position", async ({ page }) => {
-  const receipt = await createAnalysisPipeline(
-    createDemoDependencies("insufficient"),
-  ).run({ articleUrl, token: "SOL", riskLevel: "balanced" });
+test("persists and replays a full-stack evidence-insufficient decision", async ({ page }) => {
+  await submitAnalysis(page, { baseUrl: insufficientBaseUrl, verdict: "NO_TRADE" });
 
-  await page.route("**/api/analyses", async (route) => {
-    await route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify(receipt) });
-  });
-  await page.goto("/");
-  await page.getByLabel("News URL").fill(articleUrl);
-  await page.getByRole("button", { name: "Analyze evidence" }).click();
-
-  await expect(page.getByRole("heading", { name: "NO_TRADE" })).toBeVisible();
   await expect(page.getByText("Claim unsupported")).toBeVisible();
   await expect(page.getByText("No practice position was created.")).toBeVisible();
   await expect(page.getByText("Practice size")).toHaveCount(0);
+
+  const receiptId = await page.locator(".receipt-id-row code").textContent();
+  expect(receiptId).toBeTruthy();
+  const storedStatus = await page.evaluate(async (id) => {
+    const response = await fetch(`/api/receipts/${encodeURIComponent(id)}`);
+    return response.status;
+  }, receiptId!);
+  expect(storedStatus).toBe(200);
+
+  await page.getByRole("button", { name: "Replay receipt" }).click();
+  await expect(page.getByText("Replay matched stored decision")).toBeVisible();
 });
 
 test("keeps the successful workspace within desktop and narrow viewport bounds", async ({ page }) => {
@@ -103,37 +141,66 @@ test("keeps the successful workspace within desktop and narrow viewport bounds",
   }
 });
 
-test("supports four mobile analysis tabs and keyboard navigation", async ({ page }, testInfo) => {
+test("supports bounded mobile panels and keyboard navigation", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "mobile", "Mobile interaction contract");
   await submitAnalysis(page);
 
   const tabs = page.getByRole("tablist", { name: "Analysis views" });
   await expect(tabs.getByRole("tab")).toHaveCount(4);
+  const panelChecks = [
+    { id: "decision", tab: "Decision", heading: "LONG" },
+    { id: "claims", tab: "Claims", heading: "Claim ledger" },
+    { id: "debate", tab: "Debate", heading: "Evidence debate" },
+    { id: "evidence", tab: "Evidence", heading: "Evidence" },
+  ] as const;
 
-  const claimsTab = tabs.getByRole("tab", { name: "Claims" });
-  await claimsTab.click();
-  await expect(page.getByRole("heading", { name: "Claim ledger" })).toBeVisible();
-
-  const debateTab = tabs.getByRole("tab", { name: "Debate" });
-  await debateTab.click();
-  await expect(page.getByRole("heading", { name: "Evidence debate" })).toBeVisible();
+  for (const viewport of [
+    { width: 390, height: 844 },
+    { width: 320, height: 720 },
+  ]) {
+    await page.setViewportSize(viewport);
+    for (const panelCheck of panelChecks) {
+      await tabs.getByRole("tab", { name: panelCheck.tab }).click();
+      const panel = page.locator(`#view-${panelCheck.id}`);
+      await expectPanelFits(
+        panel,
+        panel.getByRole("heading", { name: panelCheck.heading, exact: true }),
+      );
+      await expectNoHorizontalOverflow(page);
+    }
+  }
 
   const evidenceTab = tabs.getByRole("tab", { name: "Evidence" });
-  await evidenceTab.click();
-  await expect(page.getByRole("heading", { name: "Evidence", exact: true })).toBeVisible();
   await evidenceTab.press("ArrowRight");
-
   const decisionTab = tabs.getByRole("tab", { name: "Decision" });
   await expect(decisionTab).toBeFocused();
   await expect(decisionTab).toHaveAttribute("aria-selected", "true");
   await expect(page.getByRole("heading", { name: "Decision receipt" })).toBeVisible();
 });
 
+test("matches deterministic supported workspace visuals", async ({ page }, testInfo) => {
+  await submitAnalysis(page);
+
+  if (testInfo.project.name === "desktop") {
+    await expectWorkspaceScreenshot(page, "supported-workspace.png", true);
+    return;
+  }
+
+  for (const panel of ["Decision", "Claims", "Debate", "Evidence"] as const) {
+    await page.getByRole("tab", { name: panel }).click();
+    await expectWorkspaceScreenshot(
+      page,
+      `supported-${panel.toLowerCase()}.png`,
+      panel === "Decision",
+    );
+  }
+});
+
 test("shows a safe analysis-stage message when the network fails", async ({ page }) => {
   await page.route("**/api/analyses", async (route) => {
     await route.abort("failed");
   });
-  await page.goto("/");
+  await page.goto(supportedBaseUrl);
   await page.getByLabel("News URL").fill(articleUrl);
   await page.getByRole("button", { name: "Analyze evidence" }).click();
 
