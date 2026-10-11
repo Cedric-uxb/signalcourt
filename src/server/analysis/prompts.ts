@@ -1,64 +1,115 @@
+import { Buffer } from "node:buffer";
+import { types } from "node:util";
+
 import { canonicalJson } from "../domain/canonical-json.js";
 
 export const promptVersion = "2026-10-08.1";
 
 const MAX_ARTICLE_CHARACTERS = 40_000;
-const MAX_EVIDENCE_CHARACTERS = 128_000;
+const MAX_INPUT_BYTES = 128 * 1024;
+const MAX_EVIDENCE_DEPTH = 64;
+const MAX_EVIDENCE_NODES = 10_000;
+const MAX_EVIDENCE_PROPERTIES = 10_000;
 
 type PlainJson = null | string | boolean | number | PlainJson[] | { [key: string]: PlainJson };
 
-function clonePlainJson(value: unknown, seen = new WeakSet<object>()): PlainJson {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+type TraversalBudget = {
+  nodes: number;
+  properties: number;
+  bytes: number;
+};
+
+class EvidenceTooLargeError extends Error {
+  constructor() {
+    super("Evidence data exceeds 128 KiB");
+  }
+}
+
+function consumeBytes(budget: TraversalBudget, value: string): void {
+  budget.bytes += Buffer.byteLength(value, "utf8");
+  if (budget.bytes > MAX_INPUT_BYTES) throw new EvidenceTooLargeError();
+}
+
+function consumeProperties(budget: TraversalBudget, count: number): void {
+  budget.properties += count;
+  if (budget.properties > MAX_EVIDENCE_PROPERTIES) throw new Error();
+}
+
+function clonePlainJson(
+  value: unknown,
+  seen = new WeakSet<object>(),
+  budget: TraversalBudget = { nodes: 0, properties: 0, bytes: 0 },
+  depth = 0,
+): PlainJson {
+  if (depth > MAX_EVIDENCE_DEPTH) throw new Error();
+  budget.nodes += 1;
+  if (budget.nodes > MAX_EVIDENCE_NODES) throw new Error();
+
+  if (value === null) {
+    consumeBytes(budget, "null");
+    return value;
+  }
+  if (typeof value === "string") {
+    consumeBytes(budget, value);
+    return value;
+  }
+  if (typeof value === "boolean") {
+    consumeBytes(budget, String(value));
+    return value;
+  }
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new Error();
+    consumeBytes(budget, String(value));
     return value;
   }
   if (typeof value !== "object") throw new Error();
+  if (types.isProxy(value)) throw new Error();
   if (seen.has(value)) throw new Error();
   seen.add(value);
 
-  try {
-    const prototype = Object.getPrototypeOf(value);
-    const descriptors = Object.getOwnPropertyDescriptors(value);
-    const keys = Reflect.ownKeys(descriptors);
-    if (keys.some((key) => typeof key === "symbol")) throw new Error();
+  const prototype = Object.getPrototypeOf(value);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(descriptors);
+  if (keys.some((key) => typeof key === "symbol")) throw new Error();
 
-    if (Array.isArray(value)) {
-      if (prototype !== Array.prototype) throw new Error();
-      const lengthDescriptor = descriptors.length;
-      if (
-        !lengthDescriptor ||
-        !("value" in lengthDescriptor) ||
-        lengthDescriptor.enumerable ||
-        typeof lengthDescriptor.value !== "number"
-      ) {
-        throw new Error();
-      }
-
-      const length = lengthDescriptor.value;
-      if (keys.length !== length + 1) throw new Error();
-
-      const clone: PlainJson[] = [];
-      for (let index = 0; index < length; index += 1) {
-        const descriptor = descriptors[String(index)];
-        if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) throw new Error();
-        clone.push(clonePlainJson(descriptor.value, seen));
-      }
-      return clone;
+  if (Array.isArray(value)) {
+    if (prototype !== Array.prototype) throw new Error();
+    const lengthDescriptor = descriptors.length;
+    if (
+      !lengthDescriptor ||
+      !("value" in lengthDescriptor) ||
+      lengthDescriptor.enumerable ||
+      typeof lengthDescriptor.value !== "number"
+    ) {
+      throw new Error();
     }
 
-    if (prototype !== Object.prototype && prototype !== null) throw new Error();
-    const clone: { [key: string]: PlainJson } = Object.create(null);
-    for (const key of keys) {
-      if (typeof key !== "string" || key === "toJSON") throw new Error();
+    const length = lengthDescriptor.value;
+    if (keys.length !== length + 1) throw new Error();
+    consumeProperties(budget, length);
+
+    const clone: PlainJson[] = [];
+    for (let index = 0; index < length; index += 1) {
+      const key = String(index);
       const descriptor = descriptors[key];
       if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) throw new Error();
-      clone[key] = clonePlainJson(descriptor.value, seen);
+      consumeBytes(budget, key);
+      clone.push(clonePlainJson(descriptor.value, seen, budget, depth + 1));
     }
     return clone;
-  } finally {
-    seen.delete(value);
   }
+
+  if (prototype !== Object.prototype && prototype !== null) throw new Error();
+  consumeProperties(budget, keys.length);
+  const clone: { [key: string]: PlainJson } = Object.create(null);
+  for (const key of keys) {
+    if (typeof key !== "string" || key === "toJSON") throw new Error();
+    const descriptor = descriptors[key];
+    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) throw new Error();
+    consumeBytes(budget, key);
+    clone[key] = clonePlainJson(descriptor.value, seen, budget, depth + 1);
+  }
+  return clone;
 }
 
 export const systemBoundary = [
@@ -76,6 +127,9 @@ export function claimPrompt(articleText: string): string {
   }
 
   const inputData = JSON.stringify({ article: articleText });
+  if (Buffer.byteLength(inputData, "utf8") > MAX_INPUT_BYTES) {
+    throw new Error("Article data exceeds 128 KiB");
+  }
   return [
     "Extract at most three independently verifiable market claims.",
     "Each claim must be independently testable and use the JSON shape",
@@ -103,11 +157,12 @@ export function debatePrompt(stance: "bull" | "bear", evidence: unknown): string
       throw new Error();
     }
     inputData = canonicalJson({ evidence: clonedEvidence });
-  } catch {
+  } catch (error) {
+    if (error instanceof EvidenceTooLargeError) throw error;
     throw new Error("Evidence data must be a non-empty JSON object or array");
   }
-  if (inputData.length > MAX_EVIDENCE_CHARACTERS) {
-    throw new Error("Evidence data exceeds 128000 characters");
+  if (Buffer.byteLength(inputData, "utf8") > MAX_INPUT_BYTES) {
+    throw new EvidenceTooLargeError();
   }
 
   return [

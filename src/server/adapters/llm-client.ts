@@ -12,8 +12,8 @@ const MAX_RESPONSE_BYTES = 512 * 1024;
 
 const claimSchema = z
   .object({
-    id: z.string().trim().min(1),
-    text: z.string().trim().min(1),
+    id: z.string().trim().min(1).max(64),
+    text: z.string().trim().min(1).max(500),
   })
   .strict();
 
@@ -27,20 +27,21 @@ const claimsOutputSchema = z
   .strict();
 
 const citationsSchema = z
-  .array(z.string().trim().min(1))
+  .array(z.string().trim().min(1).max(128))
   .min(1)
+  .max(20)
   .refine((citations) => new Set(citations).size === citations.length);
 
 const strictBullArgumentSchema = bullArgumentSchema
   .extend({
-    thesis: z.string().trim().min(1),
+    thesis: z.string().trim().min(1).max(1_000),
     citations: citationsSchema,
   })
   .strict();
 
 const strictBearArgumentSchema = bearArgumentSchema
   .extend({
-    thesis: z.string().trim().min(1),
+    thesis: z.string().trim().min(1).max(1_000),
     citations: citationsSchema,
   })
   .strict();
@@ -190,6 +191,7 @@ export function createLlmClient({ baseUrl, apiKey, model, fetchImpl = fetch }: O
     try {
       response = await fetchImpl(`${normalizedBaseUrl}/chat/completions`, {
         method: "POST",
+        redirect: "error",
         headers: {
           Authorization: `Bearer ${normalizedApiKey}`,
           "Content-Type": "application/json",
@@ -197,6 +199,7 @@ export function createLlmClient({ baseUrl, apiKey, model, fetchImpl = fetch }: O
         body: JSON.stringify({
           model: normalizedModel,
           temperature: 0,
+          max_tokens: 1_200,
           response_format: { type: "json_object" },
           messages: [
             { role: "system", content: systemBoundary },

@@ -113,6 +113,44 @@ function dynamicEvidenceCases(): DynamicEvidenceCase[] {
   ];
 }
 
+function trappedProxyEvidence() {
+  const traps = {
+    getPrototypeOf: vi.fn((target: object) => Reflect.getPrototypeOf(target)),
+    ownKeys: vi.fn((target: object) => Reflect.ownKeys(target)),
+    getOwnPropertyDescriptor: vi.fn((target: object, key: PropertyKey) =>
+      Reflect.getOwnPropertyDescriptor(target, key),
+    ),
+  };
+  const proxy = new Proxy({ id: "ev-1" }, traps);
+  return { value: { nested: proxy }, traps };
+}
+
+function sharedDagEvidence(): unknown {
+  let shared: unknown = { id: "ev-leaf" };
+  for (let depth = 0; depth < 12; depth += 1) {
+    shared = { left: shared, right: shared };
+  }
+  return shared;
+}
+
+function deepEvidence(depth: number): unknown {
+  let value: unknown = { id: "ev-leaf" };
+  for (let index = 0; index < depth; index += 1) value = { next: value };
+  return value;
+}
+
+function overNodeBudgetEvidence(): unknown {
+  return Array.from({ length: 5_000 }, () => [0]);
+}
+
+function overPropertyBudgetEvidence(): unknown {
+  return Object.fromEntries(Array.from({ length: 10_001 }, (_, index) => [`k${index}`, 0]));
+}
+
+function largeValidEvidence(): unknown {
+  return Array.from({ length: 1_000 }, (_, index) => ({ id: `ev-${index}`, value: index }));
+}
+
 function completionResponse(
   output: unknown,
   options: { envelopeExtra?: Record<string, unknown>; messageExtra?: Record<string, unknown> } = {},
@@ -209,6 +247,14 @@ describe("prompt boundaries", () => {
     expect(() => claimPrompt("a".repeat(40_001))).toThrow("Article text exceeds 40000 characters");
   });
 
+  it("rejects article JSON that expands beyond 128 KiB", () => {
+    expect(() => claimPrompt("\0".repeat(40_000))).toThrow("Article data exceeds 128 KiB");
+  });
+
+  it("accepts ordinary article text near the character limit", () => {
+    expect(() => claimPrompt("a".repeat(40_000))).not.toThrow();
+  });
+
   it("serializes debate evidence as data and binds the requested stance", () => {
     const evidence = {
       id: "ev-1",
@@ -280,6 +326,28 @@ describe("prompt boundaries", () => {
     expect(invocationCount).toBe(0);
   });
 
+  it("rejects a nested Proxy without invoking any traps", () => {
+    const { value, traps } = trappedProxyEvidence();
+
+    expect(() => debatePrompt("bull", value)).toThrow(
+      "Evidence data must be a non-empty JSON object or array",
+    );
+    expect(traps.getPrototypeOf).not.toHaveBeenCalled();
+    expect(traps.ownKeys).not.toHaveBeenCalled();
+    expect(traps.getOwnPropertyDescriptor).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "shared DAG", create: sharedDagEvidence },
+    { name: "depth over 64", create: () => deepEvidence(65) },
+    { name: "node budget", create: overNodeBudgetEvidence },
+    { name: "property budget", create: overPropertyBudgetEvidence },
+  ])("rejects evidence exceeding the $name traversal boundary", ({ create }) => {
+    expect(() => debatePrompt("bear", create())).toThrow(
+      "Evidence data must be a non-empty JSON object or array",
+    );
+  });
+
   it("accepts frozen plain evidence deterministically", () => {
     const frozen = Object.freeze({ z: 1, a: Object.freeze({ y: 2, b: 3 }) });
     const plain = { a: { b: 3, y: 2 }, z: 1 };
@@ -297,6 +365,10 @@ describe("prompt boundaries", () => {
     );
   });
 
+  it("accepts a large legal structure without shared references", () => {
+    expect(() => debatePrompt("bull", largeValidEvidence())).not.toThrow();
+  });
+
   it("rejects unsupported debate stances", () => {
     expect(() => debatePrompt("neutral" as "bull", [])).toThrow(
       "Debate stance must be bull or bear",
@@ -304,9 +376,19 @@ describe("prompt boundaries", () => {
   });
 
   it("rejects oversized serialized evidence", () => {
-    expect(() => debatePrompt("bull", { payload: "x".repeat(128_001) })).toThrow(
-      "Evidence data exceeds 128000 characters",
+    expect(() => debatePrompt("bull", { payload: "x".repeat(132_000) })).toThrow(
+      "Evidence data exceeds 128 KiB",
     );
+  });
+
+  it("rejects clearly oversized multi-byte evidence", () => {
+    expect(() => debatePrompt("bull", { payload: "界".repeat(50_000) })).toThrow(
+      "Evidence data exceeds 128 KiB",
+    );
+  });
+
+  it("accepts reasonable multi-byte evidence", () => {
+    expect(() => debatePrompt("bull", { payload: "界".repeat(10_000) })).not.toThrow();
   });
 });
 
@@ -329,6 +411,7 @@ describe("createLlmClient request contract", () => {
     expect(url).toBe("https://llm.example.test/v1/chat/completions");
     expect(init).toMatchObject({
       method: "POST",
+      redirect: "error",
       headers: {
         Authorization: "Bearer fixture-credential",
         "Content-Type": "application/json",
@@ -340,6 +423,7 @@ describe("createLlmClient request contract", () => {
     expect(body).toEqual({
       model: "fixture-model",
       temperature: 0,
+      max_tokens: 1200,
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: systemBoundary },
@@ -348,6 +432,21 @@ describe("createLlmClient request contract", () => {
     });
     expect(body.messages[0].content).not.toContain(injection);
     expect(body.messages[1].content).toContain(JSON.stringify({ article: injection }));
+  });
+
+  it("does not retry or resend the body when fetch rejects a redirect", async () => {
+    const sentBodies: BodyInit[] = [];
+    const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      if (init?.body !== undefined && init.body !== null) sentBodies.push(init.body);
+      throw new TypeError("redirect mode is set to error");
+    });
+
+    await expect(clientWith(fetchImpl).extractClaims("Market article")).rejects.toThrow(
+      "LLM request failed",
+    );
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(fetchImpl.mock.calls[0]?.[1]?.redirect).toBe("error");
+    expect(sentBodies).toHaveLength(1);
   });
 
   it.each([
@@ -449,6 +548,17 @@ describe("structured claim outputs", () => {
       "LLM response content schema is invalid",
     );
   });
+
+  it.each([
+    { name: "claim id", claim: { id: "i".repeat(65), text: "Claim" } },
+    { name: "claim text", claim: { id: "claim-1", text: "t".repeat(501) } },
+  ])("rejects an oversized $name", async ({ claim }) => {
+    const fetchImpl = fetchReturning(completionResponse({ claims: [claim] }));
+
+    await expect(clientWith(fetchImpl).extractClaims("Article")).rejects.toThrow(
+      "LLM response content schema is invalid",
+    );
+  });
 });
 
 describe("structured debate outputs", () => {
@@ -484,6 +594,42 @@ describe("structured debate outputs", () => {
     );
 
     await expect(clientWith(fetchImpl).argue(requested, [{ id: "ev-1" }])).rejects.toThrow(
+      "LLM response content schema is invalid",
+    );
+  });
+
+  it.each([
+    {
+      name: "thesis",
+      argument: {
+        stance: "bull",
+        thesis: "t".repeat(1_001),
+        confidence: 0.5,
+        citations: ["ev-1"],
+      },
+    },
+    {
+      name: "citation count",
+      argument: {
+        stance: "bull",
+        thesis: "Thesis",
+        confidence: 0.5,
+        citations: Array.from({ length: 21 }, (_, index) => `ev-${index}`),
+      },
+    },
+    {
+      name: "citation length",
+      argument: {
+        stance: "bull",
+        thesis: "Thesis",
+        confidence: 0.5,
+        citations: ["c".repeat(129)],
+      },
+    },
+  ])("rejects oversized argument $name", async ({ argument }) => {
+    const fetchImpl = fetchReturning(completionResponse(argument));
+
+    await expect(clientWith(fetchImpl).argue("bull", evidenceFixture())).rejects.toThrow(
       "LLM response content schema is invalid",
     );
   });
@@ -589,6 +735,42 @@ describe("structured debate outputs", () => {
       expect(fetchImpl).not.toHaveBeenCalled();
     },
   );
+
+  it("rejects a nested Proxy before transport without invoking any traps", async () => {
+    const { value, traps } = trappedProxyEvidence();
+    const fetchImpl = fetchReturning(completionResponse({}));
+
+    await expect(clientWith(fetchImpl).argue("bear", value)).rejects.toThrow(
+      "LLM evidence must be a non-empty JSON object or array",
+    );
+    expect(traps.getPrototypeOf).not.toHaveBeenCalled();
+    expect(traps.ownKeys).not.toHaveBeenCalled();
+    expect(traps.getOwnPropertyDescriptor).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "shared DAG", create: sharedDagEvidence },
+    { name: "depth over 64", create: () => deepEvidence(65) },
+    { name: "node budget", create: overNodeBudgetEvidence },
+    { name: "property budget", create: overPropertyBudgetEvidence },
+  ])("rejects $name evidence before transport", async ({ create }) => {
+    const fetchImpl = fetchReturning(completionResponse({}));
+
+    await expect(clientWith(fetchImpl).argue("bull", create())).rejects.toThrow(
+      "LLM evidence must be a non-empty JSON object or array",
+    );
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("maps oversized evidence to the unified client error before transport", async () => {
+    const fetchImpl = fetchReturning(completionResponse({}));
+
+    await expect(
+      clientWith(fetchImpl).argue("bull", { payload: "界".repeat(50_000) }),
+    ).rejects.toThrow("LLM evidence must be a non-empty JSON object or array");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
 });
 
 describe("LLM response failures", () => {
