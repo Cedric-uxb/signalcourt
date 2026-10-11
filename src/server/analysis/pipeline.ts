@@ -528,7 +528,16 @@ async function collectArguments(
     return { arguments: fallbackArguments(), unavailable: true };
   }
 
-  const arguments_: Receipt["arguments"] = [bull.data, bear.data];
+  const bullCitations = normalizeUniqueCitations(bull.data.citations);
+  const bearCitations = normalizeUniqueCitations(bear.data.citations);
+  if (!bullCitations || !bearCitations) {
+    return { arguments: fallbackArguments(), unavailable: true };
+  }
+
+  const arguments_: Receipt["arguments"] = [
+    { ...bull.data, citations: bullCitations },
+    { ...bear.data, citations: bearCitations },
+  ];
   return {
     arguments: arguments_,
     unavailable: argumentsAreFallback(arguments_),
@@ -541,6 +550,13 @@ function evidenceHashesAreValid(evidence: Evidence[]): boolean {
 
 function valuesAreUnique(values: readonly string[]): boolean {
   return new Set(values).size === values.length;
+}
+
+function normalizeUniqueCitations(citations: readonly string[]): string[] | null {
+  const normalized = citations.map((citation) => citation.trim());
+  return normalized.every(Boolean) && valuesAreUnique(normalized)
+    ? normalized
+    : null;
 }
 
 function receiptIdentifiersAreValid(
@@ -560,7 +576,9 @@ function receiptIdentifiersAreValid(
     return false;
   }
 
-  return receipt.arguments.every(({ citations }) => valuesAreUnique(citations));
+  return receipt.arguments.every(({ citations }) =>
+    normalizeUniqueCitations(citations) !== null
+  );
 }
 
 function inferEvidenceMode(evidence: Evidence[]): "live" | "simulated" {

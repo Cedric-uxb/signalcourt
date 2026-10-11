@@ -485,6 +485,15 @@ it.each([
     ],
     output: [verification("claim-1"), verification("claim-1")],
   },
+  {
+    name: "duplicate evidence ids",
+    claims: [{ id: "claim-1", text: "Claim one" }],
+    output: [verification(
+      "claim-1",
+      "verified",
+      ["news-1", "news-1"],
+    )],
+  },
 ])("fails closed for verifier output with $name", async ({ claims, output }) => {
   const dependencies = makeDependencies({
     llm: {
@@ -1067,7 +1076,8 @@ it("returns NO_TRADE when either argument contains a missing citation", async ()
   expect(receipt.riskPlan).toBeNull();
 });
 
-it("rejects duplicate argument citations before producing a receipt", async () => {
+it("routes duplicate argument citations to deterministic fallback", async () => {
+  const duplicateCitation = "private-duplicate-citation";
   const dependencies = makeDependencies({
     llm: {
       ...makeDependencies().llm,
@@ -1075,14 +1085,26 @@ it("rejects duplicate argument citations before producing a receipt", async () =
         stance,
         stance === "bull" ? 0.8 : 0.4,
         stance === "bull"
-          ? ["article-1", "article-1"]
+          ? [duplicateCitation, ` ${duplicateCitation} `]
           : ["article-1"],
       )),
     },
   });
 
-  await expect(createAnalysisPipeline(dependencies).run(rawInput))
-    .rejects.toThrow("Receipt identifier integrity check failed");
+  const receipt = await createAnalysisPipeline(dependencies).run(rawInput);
+
+  expect(receiptSchema.safeParse(receipt).success).toBe(true);
+  expect(receipt).toMatchObject({
+    verdict: "NO_TRADE",
+    confidence: 0,
+    reasonCodes: ["MODEL_UNAVAILABLE"],
+    riskPlan: null,
+    arguments: [
+      { stance: "bull", confidence: 0, citations: ["article-1"] },
+      { stance: "bear", confidence: 0, citations: ["article-1"] },
+    ],
+  });
+  expect(JSON.stringify(receipt)).not.toContain(duplicateCitation);
 });
 
 it("returns NO_TRADE without a risk plan when confidence is tied", async () => {
