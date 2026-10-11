@@ -30,7 +30,7 @@ export const evidenceSchema = z.object({
   observedAt: z.string().datetime().nullable(),
   status: z.enum(["ok", "partial", "unavailable"]),
   dataMode: z.enum(["live", "mixed", "simulated", "unknown"]),
-  payload: z.unknown(),
+  payload: z.json(),
   summary: z.string(),
   warnings: z.array(z.string()),
 });
@@ -43,12 +43,26 @@ export const claimSchema = z.object({
   explanation: z.string().min(1),
 });
 
-export const argumentSchema = z.object({
-  stance: z.enum(["bull", "bear"]),
+const argumentShape = {
   thesis: z.string().min(1),
   confidence: z.number().min(0).max(1),
   citations: z.array(z.string()).min(1),
+};
+
+export const bullArgumentSchema = z.object({
+  stance: z.literal("bull"),
+  ...argumentShape,
 });
+
+export const bearArgumentSchema = z.object({
+  stance: z.literal("bear"),
+  ...argumentShape,
+});
+
+export const argumentSchema = z.discriminatedUnion("stance", [
+  bullArgumentSchema,
+  bearArgumentSchema,
+]);
 
 export const riskPlanSchema = z.object({
   entry: z.number().positive(),
@@ -64,7 +78,7 @@ export const receiptSchema = z.object({
   input: analysisRequestSchema,
   evidence: z.array(evidenceSchema),
   claims: z.array(claimSchema),
-  arguments: z.tuple([argumentSchema, argumentSchema]),
+  arguments: z.tuple([bullArgumentSchema, bearArgumentSchema]),
   verdict: verdictSchema,
   confidence: z.number().min(0).max(1),
   reasonCodes: z.array(z.enum(reasonCodes)),
