@@ -20,10 +20,7 @@ import {
 } from "./config.js";
 import { openDatabase } from "./persistence/database.js";
 import { createReceiptRepository } from "./persistence/receipt-repository.js";
-import {
-  registerAnalysisRoute,
-  type AnalysisPipeline,
-} from "./routes/analysis.js";
+import { registerAnalysisRoute } from "./routes/analysis.js";
 import { registerReceiptRoutes } from "./routes/receipts.js";
 import { registerSystemRoute } from "./routes/system.js";
 
@@ -40,7 +37,6 @@ export type AppOptions = {
   logger?: FastifyServerOptions["logger"];
   config?: ServerConfig;
   dependencies?: AnalysisDependencies;
-  pipeline?: AnalysisPipeline;
   repository?: ReceiptRepository;
   db?: Database.Database;
   idGenerator?: () => string;
@@ -79,6 +75,31 @@ function createLiveDependencies(config: ServerConfig): AnalysisDependencies {
   };
 }
 
+function bindAnalysisDependencies(
+  options: AppOptions,
+  mode: ServerMode,
+  config: ServerConfig,
+): AnalysisDependencies {
+  const demoDependencies = createDemoDependencies(
+    options.demoScenario ?? "supported",
+  );
+  const dependencies = options.dependencies ?? (mode === "demo"
+    ? demoDependencies
+    : createLiveDependencies(config));
+  const configuredDemoRegistry = Object.keys(config.publisherRegistry).length > 0
+    ? config.publisherRegistry
+    : demoDependencies.publisherRegistry;
+
+  return {
+    ...dependencies,
+    evidenceMode: mode === "demo" ? "simulated" : "live",
+    publisherRegistry: mode === "live"
+      ? config.publisherRegistry
+      : dependencies.publisherRegistry ?? configuredDemoRegistry,
+    id: options.idGenerator ?? randomUUID,
+  };
+}
+
 export function buildApp(options: AppOptions = {}) {
   let db = options.db;
   let databaseClosed = false;
@@ -107,16 +128,9 @@ export function buildApp(options: AppOptions = {}) {
       repository = createReceiptRepository(db);
     }
 
-    let pipeline = options.pipeline;
-    if (!pipeline) {
-      const dependencies = options.dependencies ?? (mode === "demo"
-        ? {
-            ...createDemoDependencies(options.demoScenario ?? "supported"),
-            id: options.idGenerator ?? randomUUID,
-          }
-        : createLiveDependencies(config));
-      pipeline = createAnalysisPipeline(dependencies);
-    }
+    const pipeline = createAnalysisPipeline(
+      bindAnalysisDependencies(options, mode, config),
+    );
 
     app.get("/api/health", async () => ({
       ok: true,

@@ -1,6 +1,7 @@
 import { buildApp } from "./app.js";
-import { readConfig } from "./config.js";
+import { loadLocalEnv, readConfig } from "./config.js";
 
+loadLocalEnv();
 const config = readConfig(process.env);
 const app = buildApp({ config });
 

@@ -1,6 +1,13 @@
+import { readFileSync } from "node:fs";
+import { domainToASCII } from "node:url";
+
+import { getDomain } from "tldts";
+
 const CONFIG_ERROR = "Invalid server configuration";
+const ENV_ERROR = "Failed to load local environment";
 const DEFAULT_RYO_MCP_URL = "https://app-ryochan.com/api/mcp";
 const DANGEROUS_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+const ENV_ASSIGNMENT_PATTERN = /^(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=/;
 
 export type ServerMode = "demo" | "live";
 
@@ -23,6 +30,27 @@ export type ServerConfig = {
 
 function invalidConfig(): never {
   throw new Error(CONFIG_ERROR);
+}
+
+function errorCode(error: unknown): string | undefined {
+  return error && typeof error === "object" && "code" in error
+    ? String(error.code)
+    : undefined;
+}
+
+export function loadLocalEnv(path = ".env"): void {
+  try {
+    const source = readFileSync(path, "utf8");
+    const valid = source.split(/\r?\n/).every((line) => {
+      const trimmed = line.trim();
+      return !trimmed || trimmed.startsWith("#") || ENV_ASSIGNMENT_PATTERN.test(trimmed);
+    });
+    if (!valid) throw new Error(ENV_ERROR);
+    process.loadEnvFile(path);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return;
+    throw new Error(ENV_ERROR);
+  }
 }
 
 function optionalTrimmed(value: string | undefined): string | undefined {
@@ -69,6 +97,16 @@ function readHttpsUrl(value: string, optional: boolean): string | undefined {
   return trimmed;
 }
 
+function normalizedPublisherDomain(rawDomain: string): string {
+  if (/\s/.test(rawDomain) || /[\/:?#@\[\]]/.test(rawDomain)) invalidConfig();
+  const withoutTrailingDot = rawDomain.replace(/\.+$/, "");
+  const asciiDomain = domainToASCII(withoutTrailingDot).toLowerCase();
+  if (!asciiDomain || DANGEROUS_KEYS.has(asciiDomain)) invalidConfig();
+  const registrableDomain = getDomain(asciiDomain, { allowPrivateDomains: true });
+  if (!registrableDomain || registrableDomain !== asciiDomain) invalidConfig();
+  return asciiDomain;
+}
+
 function readPublisherRegistry(value: string | undefined): Readonly<Record<string, string>> {
   const trimmed = value?.trim();
   if (!trimmed) return {};
@@ -83,22 +121,22 @@ function readPublisherRegistry(value: string | undefined): Readonly<Record<strin
     invalidConfig();
   }
 
-  const normalized: Record<string, string> = {};
+  const normalizedEntries: Array<[string, string]> = [];
+  const normalizedDomains = new Set<string>();
   for (const [rawDomain, rawPublisherId] of Object.entries(raw)) {
-    const domain = rawDomain.trim().toLowerCase().replace(/\.+$/, "");
+    const domain = normalizedPublisherDomain(rawDomain);
     if (
-      !domain ||
-      DANGEROUS_KEYS.has(domain) ||
-      Object.prototype.hasOwnProperty.call(normalized, domain) ||
+      normalizedDomains.has(domain) ||
       typeof rawPublisherId !== "string"
     ) {
       invalidConfig();
     }
     const publisherId = rawPublisherId.trim();
     if (!publisherId) invalidConfig();
-    normalized[domain] = publisherId;
+    normalizedDomains.add(domain);
+    normalizedEntries.push([domain, publisherId]);
   }
-  return normalized;
+  return Object.fromEntries(normalizedEntries);
 }
 
 export function readConfig(env: NodeJS.ProcessEnv): ServerConfig {

@@ -48,7 +48,11 @@ const receipt = {
   causalChain: [],
   riskPlan: null,
   model: { name: "fixture", promptVersion: "test" },
-  replay: { evidenceHash: "hash", identical: true },
+  replay: {
+    evidenceHash: "a".repeat(64),
+    receiptHash: "b".repeat(64),
+    identical: true,
+  },
 };
 
 describe("evidenceSchema", () => {
@@ -86,5 +90,22 @@ describe("receiptSchema", () => {
 
   it("accepts arguments ordered bull then bear", () => {
     expect(receiptSchema.safeParse(receipt).success).toBe(true);
+  });
+
+  it("requires evidence and full receipt integrity hashes", () => {
+    const { receiptHash: _receiptHash, ...replayWithoutReceiptHash } = receipt.replay;
+
+    expect(receiptSchema.safeParse({
+      ...receipt,
+      replay: replayWithoutReceiptHash,
+    }).success).toBe(false);
+    expect(receiptSchema.safeParse({
+      ...receipt,
+      replay: { ...receipt.replay, evidenceHash: "not-a-hash" },
+    }).success).toBe(false);
+    expect(receiptSchema.safeParse({
+      ...receipt,
+      replay: { ...receipt.replay, receiptHash: "not-a-hash" },
+    }).success).toBe(false);
   });
 });

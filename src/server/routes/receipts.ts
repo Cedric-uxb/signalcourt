@@ -3,12 +3,14 @@ import type { FastifyInstance } from "fastify";
 import type { Receipt } from "../../shared/contracts.js";
 import { replayReceipt } from "../analysis/pipeline.js";
 
+const RECEIPT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
 export type ReceiptReader = {
   findById: (id: string) => Receipt | null;
 };
 
 function validReceiptId(id: string): boolean {
-  return id.length > 0 && id.length <= 128 && id === id.trim();
+  return RECEIPT_ID_PATTERN.test(id);
 }
 
 export function registerReceiptRoutes(

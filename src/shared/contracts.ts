@@ -71,6 +71,8 @@ export const riskPlanSchema = z.object({
   practiceSizeUsd: z.number().positive(),
 });
 
+const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
+
 export const receiptSchema = z.object({
   schemaVersion: z.literal("1.0"),
   id: z.string().min(1),
@@ -85,7 +87,11 @@ export const receiptSchema = z.object({
   causalChain: z.array(z.string()),
   riskPlan: riskPlanSchema.nullable(),
   model: z.object({ name: z.string(), promptVersion: z.string() }),
-  replay: z.object({ evidenceHash: z.string(), identical: z.boolean() }),
+  replay: z.object({
+    evidenceHash: sha256Schema,
+    receiptHash: sha256Schema,
+    identical: z.boolean(),
+  }),
 });
 
 export type AnalysisRequest = z.infer<typeof analysisRequestSchema>;

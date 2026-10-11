@@ -156,7 +156,7 @@ const ryoDataSchemas: Readonly<Record<string, z.ZodType>> = {
 };
 
 const modelNameSchema = z.string().trim().min(1).max(200);
-const receiptIdSchema = z.string().trim().min(1).max(128);
+const receiptIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/);
 const evidenceModeSchema = z.enum(["live", "simulated"]);
 const trackingParameters = new Set(["gclid", "fbclid", "mc_cid", "mc_eid"]);
 const maxRyoAgeMs = 24 * 60 * 60 * 1_000;
@@ -789,6 +789,41 @@ function buildCausalChain(
   ];
 }
 
+type ReceiptIntegritySource = Pick<
+  Receipt,
+  | "schemaVersion"
+  | "id"
+  | "createdAt"
+  | "input"
+  | "evidence"
+  | "claims"
+  | "arguments"
+  | "verdict"
+  | "confidence"
+  | "reasonCodes"
+  | "causalChain"
+  | "riskPlan"
+  | "model"
+>;
+
+export function receiptIntegrityPayload(receipt: ReceiptIntegritySource) {
+  return {
+    schemaVersion: receipt.schemaVersion,
+    id: receipt.id,
+    createdAt: receipt.createdAt,
+    input: receipt.input,
+    evidence: receipt.evidence,
+    claims: receipt.claims,
+    arguments: receipt.arguments,
+    verdict: receipt.verdict,
+    confidence: receipt.confidence,
+    reasonCodes: receipt.reasonCodes,
+    causalChain: receipt.causalChain,
+    riskPlan: receipt.riskPlan,
+    model: receipt.model,
+  };
+}
+
 export function replayReceipt(rawReceipt: unknown): {
   evidenceHash: string;
   identical: boolean;
@@ -798,6 +833,9 @@ export function replayReceipt(rawReceipt: unknown): {
 
   const receipt = parsed.data;
   const evidenceHash = sha256(receipt.evidence);
+  // This is an integrity hash, not a signature. A writer who can alter the
+  // receipt and recompute the hash can forge it; append-only storage reduces risk.
+  const receiptHash = sha256(receiptIntegrityPayload(receipt));
   if (!receiptIdentifiersAreValid(receipt)) {
     return { evidenceHash, identical: false };
   }
@@ -818,6 +856,7 @@ export function replayReceipt(rawReceipt: unknown): {
       evidenceHashesAreValid(receipt.evidence) &&
       claimsReferenceNews(receipt.claims, receipt.evidence) &&
       receipt.replay.evidenceHash === evidenceHash &&
+      receipt.replay.receiptHash === receiptHash &&
       canonicalJson({
         verdict: receipt.verdict,
         confidence: receipt.confidence,
@@ -1074,10 +1113,22 @@ export function createAnalysisPipeline(deps: AnalysisDependencies) {
         ...decision,
         causalChain,
         model: { name: modelName, promptVersion },
-        replay: { evidenceHash, identical: false },
+        replay: {
+          evidenceHash,
+          receiptHash: "0".repeat(64),
+          identical: false,
+        },
       });
-      const replay = replayReceipt(candidate);
-      return receiptSchema.parse({ ...candidate, replay });
+      const receiptHash = sha256(receiptIntegrityPayload(candidate));
+      const withIntegrity = receiptSchema.parse({
+        ...candidate,
+        replay: { ...candidate.replay, receiptHash },
+      });
+      const replay = replayReceipt(withIntegrity);
+      return receiptSchema.parse({
+        ...withIntegrity,
+        replay: { ...withIntegrity.replay, ...replay },
+      });
     },
   };
 }

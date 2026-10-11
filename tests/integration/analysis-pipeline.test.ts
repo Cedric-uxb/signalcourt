@@ -5,6 +5,7 @@ import { sha256 } from "../../src/server/domain/canonical-json.js";
 import { createDemoDependencies } from "../../src/server/analysis/demo-fixture.js";
 import {
   createAnalysisPipeline,
+  receiptIntegrityPayload,
   replayReceipt,
 } from "../../src/server/analysis/pipeline.js";
 
@@ -55,6 +56,9 @@ it("creates a replayable supported simulated decision receipt offline", async ()
   expect(receipt.evidence.every(({ hash, ...partial }) => hash === sha256(partial)))
     .toBe(true);
   expect(receipt.replay.evidenceHash).toBe(sha256(receipt.evidence));
+  expect(receipt.replay.receiptHash).toBe(
+    sha256(receiptIntegrityPayload(receipt)),
+  );
   expect(replayReceipt(receipt)).toEqual({
     evidenceHash: receipt.replay.evidenceHash,
     identical: true,
@@ -68,6 +72,18 @@ it("creates a replayable supported simulated decision receipt offline", async ()
     { primary: "available", derivatives: "available" },
     { sentiment: "available" },
   ]);
+});
+
+it("requires a stored full receipt integrity hash for replay", async () => {
+  const receipt = await createAnalysisPipeline(
+    createDemoDependencies("supported"),
+  ).run(input);
+  const { receiptHash: _receiptHash, ...incompleteReplay } = receipt.replay;
+
+  expect(replayReceipt({ ...receipt, replay: incompleteReplay })).toEqual({
+    evidenceHash: "",
+    identical: false,
+  });
 });
 
 it("creates an offline insufficient-evidence receipt without claiming live data", async () => {
@@ -199,6 +215,48 @@ it("rejects duplicate citations within one debate argument", async () => {
 
 it.each([
   {
+    name: "article URL",
+    mutate: (receipt: Receipt) => {
+      receipt.input.articleUrl = "https://example.com/different-news";
+    },
+  },
+  {
+    name: "token",
+    mutate: (receipt: Receipt) => {
+      receipt.input.token = "ETH";
+    },
+  },
+  {
+    name: "risk level",
+    mutate: (receipt: Receipt) => {
+      receipt.input.riskLevel = "aggressive";
+    },
+  },
+  {
+    name: "model name",
+    mutate: (receipt: Receipt) => {
+      receipt.model.name = "tampered-model";
+    },
+  },
+  {
+    name: "prompt version",
+    mutate: (receipt: Receipt) => {
+      receipt.model.promptVersion = "tampered-prompt";
+    },
+  },
+  {
+    name: "receipt id",
+    mutate: (receipt: Receipt) => {
+      receipt.id = "tampered-id";
+    },
+  },
+  {
+    name: "creation time",
+    mutate: (receipt: Receipt) => {
+      receipt.createdAt = "2026-10-08T12:00:01.000Z";
+    },
+  },
+  {
     name: "evidence payload",
     mutate: (receipt: Receipt) => {
       receipt.evidence[0]!.payload = "tampered payload";
@@ -227,6 +285,12 @@ it.each([
     name: "decision",
     mutate: (receipt: Receipt) => {
       receipt.confidence = 0.7;
+    },
+  },
+  {
+    name: "causal chain",
+    mutate: (receipt: Receipt) => {
+      receipt.causalChain[0] = "tampered-causal-entry";
     },
   },
 ])("detects replay tampering in $name", async ({ mutate }) => {

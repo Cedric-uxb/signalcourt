@@ -20,7 +20,11 @@ function temporaryDirectory(): string {
 
 function receiptFixture(overrides: Partial<Receipt> = {}): Receipt {
   return receiptSchema.parse({
-    replay: { identical: true, evidenceHash: "evidence-hash" },
+    replay: {
+      identical: true,
+      evidenceHash: "a".repeat(64),
+      receiptHash: "b".repeat(64),
+    },
     model: { promptVersion: "test", name: "fixture" },
     riskPlan: null,
     causalChain: ["Independent evidence is insufficient"],

@@ -37,6 +37,36 @@ function repositoryFor(receipt: Receipt | null = null) {
   };
 }
 
+function liveLikeDemoDependencies(): AnalysisDependencies {
+  const dependencies = createDemoDependencies("supported");
+  return {
+    ...dependencies,
+    evidenceMode: "live",
+    ryo: {
+      call: async (tool, arguments_) => ({
+        ...await dependencies.ryo.call(tool, arguments_),
+        dataMode: "live" as const,
+      }),
+    },
+  };
+}
+
+function completeLiveEnv(
+  publisherRegistry: Readonly<Record<string, string>> = {
+    "one.example": "publisher-one",
+    "two.example": "publisher-two",
+  },
+): NodeJS.ProcessEnv {
+  return {
+    RYO_MCP_KEY: "ryo-key",
+    TAVILY_API_KEY: "tavily-key",
+    LLM_BASE_URL: "https://llm.example.test/v1",
+    LLM_API_KEY: "llm-key",
+    LLM_MODEL: "model",
+    PUBLISHER_REGISTRY_JSON: JSON.stringify(publisherRegistry),
+  };
+}
+
 describe("GET /api/health", () => {
   it("returns the SignalCourt service status", async () => {
     const app = buildApp({ env: {}, databasePath: ":memory:" });
@@ -123,6 +153,82 @@ describe("analysis and receipt routes", () => {
     }
   });
 
+  it("forces fresh ids for injected demo dependencies", async () => {
+    const ids = ["injected-demo-1", "injected-demo-2"];
+    const app = buildApp({
+      mode: "demo",
+      env: {},
+      dependencies: createDemoDependencies("supported"),
+      databasePath: ":memory:",
+      idGenerator: () => ids.shift() ?? "unexpected-id",
+    });
+
+    try {
+      const first = await app.inject({ method: "POST", url: "/api/analyses", payload: validInput });
+      const second = await app.inject({ method: "POST", url: "/api/analyses", payload: validInput });
+
+      expect(first.statusCode).toBe(201);
+      expect(second.statusCode).toBe(201);
+      expect(first.json<Receipt>().id).toBe("injected-demo-1");
+      expect(second.json<Receipt>().id).toBe("injected-demo-2");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("forces demo provenance on injected live-like dependencies", async () => {
+    const app = buildApp({
+      mode: "demo",
+      env: {},
+      dependencies: liveLikeDemoDependencies(),
+      databasePath: ":memory:",
+      idGenerator: () => "forced-demo-id",
+    });
+
+    try {
+      const created = await app.inject({ method: "POST", url: "/api/analyses", payload: validInput });
+      const system = await app.inject({ method: "GET", url: "/api/system" });
+      const receipt = created.json<Receipt>();
+
+      expect(created.statusCode).toBe(201);
+      expect(receipt.id).toBe("forced-demo-id");
+      expect(receipt.verdict).toBe("NO_TRADE");
+      expect(receipt.evidence.find(({ kind }) => kind === "article")?.dataMode)
+        .toBe("simulated");
+      expect(system.json()).toMatchObject({
+        mode: "demo",
+        capabilities: { ryo: false, news: false, model: false },
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("forces live publisher registry and id on injected dependencies", async () => {
+    const app = buildApp({
+      mode: "live",
+      env: completeLiveEnv({
+        "source.example": "configured-source",
+        "wire.example": "configured-wire",
+      }),
+      dependencies: liveLikeDemoDependencies(),
+      databasePath: ":memory:",
+      idGenerator: () => "forced-live-id",
+    });
+
+    try {
+      const response = await app.inject({ method: "POST", url: "/api/analyses", payload: validInput });
+      const receipt = response.json<Receipt>();
+
+      expect(response.statusCode).toBe(201);
+      expect(receipt.id).toBe("forced-live-id");
+      expect(receipt.verdict).toBe("NO_TRADE");
+      expect(receipt.reasonCodes).toContain("INSUFFICIENT_EVIDENCE");
+    } finally {
+      await app.close();
+    }
+  });
+
   it("returns NO_TRADE for the insufficient demo scenario", async () => {
     const app = buildApp({
       mode: "demo",
@@ -150,10 +256,12 @@ describe("analysis and receipt routes", () => {
     ["invalid token", { ...validInput, token: "not/a/token" }],
     ["invalid URL", { ...validInput, articleUrl: "not-a-url" }],
   ])("rejects %s before calling the pipeline", async (_name, payload) => {
-    const run = vi.fn();
+    const base = createDemoDependencies("supported");
+    const articleFetcher = vi.fn(base.articleFetcher);
+    const now = vi.fn(base.now);
     const app = buildApp({
       env: {},
-      pipeline: { run },
+      dependencies: { ...base, articleFetcher, now },
       repository: repositoryFor(),
     });
 
@@ -167,17 +275,19 @@ describe("analysis and receipt routes", () => {
         expect(Object.keys(issue).sort()).toEqual(["code", "message", "path"]);
       }
       expect(JSON.stringify(response.json())).not.toContain("not/a/token");
-      expect(run).not.toHaveBeenCalled();
+      expect(now).not.toHaveBeenCalled();
+      expect(articleFetcher).not.toHaveBeenCalled();
     } finally {
       await app.close();
     }
   });
 
   it("returns Fastify's 413 response for an oversized body", async () => {
-    const run = vi.fn();
+    const base = createDemoDependencies("supported");
+    const articleFetcher = vi.fn(base.articleFetcher);
     const app = buildApp({
       env: {},
-      pipeline: { run },
+      dependencies: { ...base, articleFetcher },
       repository: repositoryFor(),
     });
 
@@ -189,7 +299,7 @@ describe("analysis and receipt routes", () => {
       });
 
       expect(response.statusCode).toBe(413);
-      expect(run).not.toHaveBeenCalled();
+      expect(articleFetcher).not.toHaveBeenCalled();
     } finally {
       await app.close();
     }
@@ -207,7 +317,10 @@ describe("analysis and receipt routes", () => {
     const app = buildApp({
       env: {},
       logger: { level: "warn", stream },
-      pipeline: { run: vi.fn(async () => { throw new Error(sentinel); }) },
+      dependencies: {
+        ...createDemoDependencies("supported"),
+        articleFetcher: vi.fn(async () => { throw new Error(sentinel); }),
+      },
       repository: repositoryFor(),
     });
 
@@ -224,11 +337,20 @@ describe("analysis and receipt routes", () => {
     }
   });
 
-  it.each(["%20", "%20receipt", `${"a".repeat(129)}`])(
+  it.each([
+    "%20",
+    "%20receipt",
+    `${"a".repeat(129)}`,
+    "receipt%00id",
+    "receipt%0Aid",
+    "receipt%2Fid",
+    "receipt%25id",
+    "%E2%98%83",
+  ])(
     "rejects invalid receipt id %j",
     async (id) => {
       const repository = repositoryFor();
-      const app = buildApp({ env: {}, pipeline: { run: vi.fn() }, repository });
+      const app = buildApp({ env: {}, repository });
 
       try {
         for (const method of ["GET", "POST"] as const) {
@@ -244,8 +366,27 @@ describe("analysis and receipt routes", () => {
     },
   );
 
+  it.each(["550e8400-e29b-41d4-a716-446655440000", "demo-supported_1.2"])(
+    "accepts safe receipt id %j for lookup and replay",
+    async (id) => {
+      const receipt = await demoReceipt(id);
+      const repository = repositoryFor(receipt);
+      const app = buildApp({ env: {}, repository });
+
+      try {
+        const fetched = await app.inject({ method: "GET", url: `/api/receipts/${id}` });
+        const replay = await app.inject({ method: "POST", url: `/api/receipts/${id}/replay` });
+
+        expect(fetched.statusCode).toBe(200);
+        expect(replay.statusCode).toBe(200);
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
   it("returns 404 for a valid missing receipt", async () => {
-    const app = buildApp({ env: {}, pipeline: { run: vi.fn() }, repository: repositoryFor() });
+    const app = buildApp({ env: {}, repository: repositoryFor() });
 
     try {
       for (const [method, suffix] of [["GET", ""], ["POST", "/replay"]] as const) {
@@ -266,7 +407,7 @@ describe("analysis and receipt routes", () => {
       insert: vi.fn(),
       findById: vi.fn(() => { throw new Error(sentinel); }),
     };
-    const app = buildApp({ env: {}, pipeline: { run: vi.fn() }, repository });
+    const app = buildApp({ env: {}, repository });
 
     try {
       for (const [method, suffix] of [["GET", ""], ["POST", "/replay"]] as const) {
@@ -285,7 +426,6 @@ describe("analysis and receipt routes", () => {
     const tampered: Receipt = { ...original, verdict: "SHORT" };
     const app = buildApp({
       env: {},
-      pipeline: { run: vi.fn() },
       repository: repositoryFor(tampered),
     });
 
@@ -337,17 +477,7 @@ describe("system capabilities and application lifecycle", () => {
   it("reports live capabilities with injected dependencies and no network", async () => {
     const dependencies = createDemoDependencies("supported");
     const app = buildApp({
-      env: {
-        RYO_MCP_KEY: "ryo-key",
-        TAVILY_API_KEY: "tavily-key",
-        LLM_BASE_URL: "https://llm.example.test/v1",
-        LLM_API_KEY: "llm-key",
-        LLM_MODEL: "model",
-        PUBLISHER_REGISTRY_JSON: JSON.stringify({
-          "one.example": "publisher-one",
-          "two.example": "publisher-two",
-        }),
-      },
+      env: completeLiveEnv(),
       mode: "live",
       dependencies: { ...dependencies, evidenceMode: "live" },
       databasePath: ":memory:",
@@ -397,10 +527,14 @@ describe("system capabilities and application lifecycle", () => {
 
   it("closes an opened database when pipeline assembly fails", () => {
     const db = openDatabase(":memory:");
-    const invalidDependencies = {
+    const invalidDependencies: AnalysisDependencies = {
       ...createDemoDependencies("supported"),
-      evidenceMode: "invalid",
-    } as unknown as AnalysisDependencies;
+      publisherRegistry: new Proxy({}, {
+        ownKeys() {
+          throw new Error("forced pipeline assembly failure");
+        },
+      }),
+    };
 
     expect(() => buildApp({
       env: {},
@@ -418,7 +552,6 @@ describe("system capabilities and application lifecycle", () => {
       env: { PORT: "invalid" },
       db,
       repository: repositoryFor(),
-      pipeline: { run: vi.fn() },
     })).toThrow("Invalid server configuration");
     expect(db.open).toBe(false);
   });
