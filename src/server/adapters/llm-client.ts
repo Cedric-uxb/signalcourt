@@ -63,8 +63,6 @@ const completionEnvelopeSchema = z
   })
   .passthrough();
 
-const jsonValueSchema = z.json();
-
 class ResponseTooLargeError extends Error {
   constructor() {
     super("LLM response is too large");
@@ -232,22 +230,11 @@ export function createLlmClient({ baseUrl, apiKey, model, fetchImpl = fetch }: O
         throw new Error("Debate stance must be bull or bear");
       }
 
-      let parsedEvidence: ReturnType<typeof jsonValueSchema.safeParse>;
-      try {
-        parsedEvidence = jsonValueSchema.safeParse(evidence);
-      } catch {
-        throw new Error("LLM evidence must be JSON-compatible");
-      }
-      if (!parsedEvidence.success) throw new Error("LLM evidence must be JSON-compatible");
-
       let userPrompt: string;
       try {
-        userPrompt = debatePrompt(stance, parsedEvidence.data);
-      } catch (error) {
-        if (error instanceof Error && error.message === "Evidence data must be JSON-compatible") {
-          throw new Error("LLM evidence must be JSON-compatible");
-        }
-        throw error;
+        userPrompt = debatePrompt(stance, evidence);
+      } catch {
+        throw new Error("LLM evidence must be a non-empty JSON object or array");
       }
 
       const output = await complete(userPrompt);

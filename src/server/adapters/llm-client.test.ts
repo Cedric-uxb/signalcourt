@@ -10,6 +10,31 @@ import { createLlmClient } from "./llm-client.js";
 
 const MAX_RESPONSE_BYTES = 512 * 1024;
 
+function evidenceFixture() {
+  return [{ id: "ev-1", summary: "Verified market evidence" }];
+}
+
+function invalidEvidenceCases(): Array<{ name: string; value: unknown }> {
+  const circular: Record<string, unknown> = {};
+  circular.self = circular;
+
+  return [
+    { name: "null", value: null },
+    { name: "empty array", value: [] },
+    { name: "empty object", value: {} },
+    { name: "empty string", value: "" },
+    { name: "blank string", value: "   " },
+    { name: "number", value: 1 },
+    { name: "boolean", value: true },
+    { name: "undefined", value: undefined },
+    { name: "function", value: () => "instruction" },
+    { name: "BigInt", value: 1n },
+    { name: "NaN", value: Number.NaN },
+    { name: "Infinity", value: Number.POSITIVE_INFINITY },
+    { name: "circular object", value: circular },
+  ];
+}
+
 function completionResponse(
   output: unknown,
   options: { envelopeExtra?: Record<string, unknown>; messageExtra?: Record<string, unknown> } = {},
@@ -119,6 +144,46 @@ describe("prompt boundaries", () => {
     expect(prompt).toMatch(/only.*evidence id/i);
   });
 
+  it.each([
+    { name: "array", evidence: evidenceFixture() },
+    { name: "object", evidence: { id: "ev-1", summary: "Verified market evidence" } },
+  ])("accepts a non-empty JSON $name", ({ evidence }) => {
+    expect(() => debatePrompt("bull", evidence)).not.toThrow();
+  });
+
+  it.each(invalidEvidenceCases())("rejects $name evidence at the prompt boundary", ({ value }) => {
+    expect(() => debatePrompt("bull", value)).toThrow(
+      "Evidence data must be a non-empty JSON object or array",
+    );
+  });
+
+  it("does not execute a non-enumerable custom toJSON method", () => {
+    const toJSON = vi.fn(() => ({ transformed: true }));
+    const evidence: Record<string, unknown> = { id: "ev-1" };
+    Object.defineProperty(evidence, "toJSON", { value: toJSON, enumerable: false });
+
+    const prompt = debatePrompt("bull", evidence);
+
+    expect(toJSON).not.toHaveBeenCalled();
+    expect(prompt).toContain('{"evidence":{"id":"ev-1"}}');
+  });
+
+  it("rejects an enumerable custom toJSON function without executing it", () => {
+    const toJSON = vi.fn(() => ({ transformed: true }));
+
+    expect(() => debatePrompt("bull", { id: "ev-1", toJSON })).toThrow(
+      "Evidence data must be a non-empty JSON object or array",
+    );
+    expect(toJSON).not.toHaveBeenCalled();
+  });
+
+  it("produces the same prompt for semantically identical evidence key orders", () => {
+    const first = { z: 1, a: { y: 2, b: 3 } };
+    const second = { a: { b: 3, y: 2 }, z: 1 };
+
+    expect(debatePrompt("bear", first)).toBe(debatePrompt("bear", second));
+  });
+
   it("rejects unsupported debate stances", () => {
     expect(() => debatePrompt("neutral" as "bull", [])).toThrow(
       "Debate stance must be bull or bear",
@@ -126,7 +191,7 @@ describe("prompt boundaries", () => {
   });
 
   it("rejects oversized serialized evidence", () => {
-    expect(() => debatePrompt("bull", "x".repeat(128_001))).toThrow(
+    expect(() => debatePrompt("bull", { payload: "x".repeat(128_001) })).toThrow(
       "Evidence data exceeds 128000 characters",
     );
   });
@@ -320,7 +385,7 @@ describe("structured debate outputs", () => {
       }),
     );
 
-    await expect(clientWith(fetchImpl).argue("bull", [])).rejects.toThrow(
+    await expect(clientWith(fetchImpl).argue("bull", evidenceFixture())).rejects.toThrow(
       "LLM response content schema is invalid",
     );
   });
@@ -334,7 +399,7 @@ describe("structured debate outputs", () => {
       completionResponse({ stance: "bear", thesis: "Thesis", confidence: 0.5, citations }),
     );
 
-    await expect(clientWith(fetchImpl).argue("bear", [])).rejects.toThrow(
+    await expect(clientWith(fetchImpl).argue("bear", evidenceFixture())).rejects.toThrow(
       "LLM response content schema is invalid",
     );
   });
@@ -350,9 +415,25 @@ describe("structured debate outputs", () => {
     },
   ])("rejects blank or extra argument fields", async (argument) => {
     const fetchImpl = fetchReturning(completionResponse(argument));
-    await expect(clientWith(fetchImpl).argue("bull", [])).rejects.toThrow(
+    await expect(clientWith(fetchImpl).argue("bull", evidenceFixture())).rejects.toThrow(
       "LLM response content schema is invalid",
     );
+  });
+
+  it("accepts a non-empty JSON object as evidence", async () => {
+    const fetchImpl = fetchReturning(
+      completionResponse({
+        stance: "bull",
+        thesis: "Object evidence is accepted",
+        confidence: 0.6,
+        citations: ["ev-1"],
+      }),
+    );
+
+    await expect(clientWith(fetchImpl).argue("bull", { id: "ev-1" })).resolves.toMatchObject({
+      stance: "bull",
+    });
+    expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
   it("rejects unsupported requested stances before transport", async () => {
@@ -363,18 +444,23 @@ describe("structured debate outputs", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it("rejects non-JSON-compatible evidence before transport", async () => {
-    const circular: Record<string, unknown> = {};
-    circular.self = circular;
-    const invalidEvidence = [undefined, 1n, circular];
-
-    for (const evidence of invalidEvidence) {
+  it.each(invalidEvidenceCases())("rejects $name evidence before transport", async ({ value }) => {
       const fetchImpl = fetchReturning(completionResponse({}));
-      await expect(clientWith(fetchImpl).argue("bull", evidence)).rejects.toThrow(
-        "LLM evidence must be JSON-compatible",
+      await expect(clientWith(fetchImpl).argue("bull", value)).rejects.toThrow(
+        "LLM evidence must be a non-empty JSON object or array",
       );
       expect(fetchImpl).not.toHaveBeenCalled();
-    }
+  });
+
+  it("does not execute custom toJSON evidence before transport", async () => {
+    const toJSON = vi.fn(() => ({ transformed: true }));
+    const fetchImpl = fetchReturning(completionResponse({}));
+
+    await expect(clientWith(fetchImpl).argue("bull", { id: "ev-1", toJSON })).rejects.toThrow(
+      "LLM evidence must be a non-empty JSON object or array",
+    );
+    expect(toJSON).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
 
