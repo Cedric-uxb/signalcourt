@@ -231,12 +231,13 @@ dd { margin: 5px 0 0; font-weight: 760; font-variant-numeric: tabular-nums; }
 .ledger p { margin: 6px 0; color: var(--muted); font-size: 12px; }
 .citation-line { display: inline-flex; align-items: center; gap: 5px; color: #536159; font-size: 11px; }
 
-.debate-timeline { margin-top: 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.debate-score-note { margin: 8px 0 0; color: var(--muted); font-size: 11px; }
+.debate-timeline { margin-top: 8px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
 .debate-timeline article { position: relative; padding: 16px; }
 .debate-timeline article + article { border-top: 1px solid var(--line); }
 .debate-heading { display: flex; justify-content: space-between; gap: 12px; }
 .debate-heading span { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 760; }
-.debate-heading strong { font-size: 12px; font-variant-numeric: tabular-nums; }
+.debate-heading strong { max-width: 145px; text-align: right; font-size: 11px; font-variant-numeric: tabular-nums; }
 .debate-timeline article[data-stance="bull"] .debate-heading { color: var(--green); }
 .debate-timeline article[data-stance="bear"] .debate-heading { color: var(--red); }
 .debate-timeline p { margin: 9px 0 12px; font-size: 13px; }

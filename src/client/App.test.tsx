@@ -235,6 +235,9 @@ describe("SignalCourt workspace", () => {
       .toBeVisible();
     expect(screen.getByText("A regulated market filing was submitted.")).toBeVisible();
     expect(screen.getByText("Bull case")).toBeVisible();
+    expect(screen.getByText("78% model argument score")).toBeVisible();
+    expect(screen.getByText("42% model argument score")).toBeVisible();
+    expect(screen.getByText("Model argument scores are not outcome probabilities.")).toBeVisible();
     expect(screen.getByText("Public filing register")).toBeVisible();
     expect(screen.getAllByText("Simulated").length).toBeGreaterThan(0);
   });
@@ -309,6 +312,14 @@ describe("SignalCourt workspace", () => {
       "false",
     );
     expect(screen.getByRole("tabpanel", { name: "Claims" })).toBeVisible();
+
+    fireEvent.click(within(tabs).getByRole("tab", { name: "Debate" }));
+    const debatePanel = screen.getByRole("tabpanel", { name: "Debate" });
+    expect(within(debatePanel).getByText("78% model argument score")).toBeVisible();
+    expect(within(debatePanel).getByText("42% model argument score")).toBeVisible();
+    expect(within(debatePanel).getByText(
+      "Model argument scores are not outcome probabilities.",
+    )).toBeVisible();
 
     act(() => viewport.setMobile(false));
     expect(screen.queryByRole("tablist", { name: "Analysis views" })).not.toBeInTheDocument();
@@ -498,4 +509,48 @@ describe("SignalCourt workspace", () => {
 
     expect(screen.queryByText(/Clipboard unavailable/)).not.toBeInTheDocument();
   });
+
+  it.each(["resolve", "reject"] as const)(
+    "ignores receipt A clipboard %s after receipt B replaces it",
+    async (settlement) => {
+      let settleCopy!: () => void;
+      const pendingCopy = new Promise<void>((resolve, reject) => {
+        settleCopy = () => settlement === "resolve"
+          ? resolve()
+          : reject(new Error("Clipboard denied"));
+      });
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { writeText: vi.fn(() => pendingCopy) },
+      });
+      const onReplay = vi.fn(async () => undefined);
+      const { rerender } = render(
+        <ReceiptPanel
+          receiptId={receipt.id}
+          createdAt={receipt.createdAt}
+          storedReplayIdentical
+          replayState={{ status: "idle" }}
+          onReplay={onReplay}
+        />,
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "Copy receipt ID" }));
+      rerender(
+        <ReceiptPanel
+          receiptId={secondReceipt.id}
+          createdAt={secondReceipt.createdAt}
+          storedReplayIdentical
+          replayState={{ status: "idle" }}
+          onReplay={onReplay}
+        />,
+      );
+
+      await act(async () => {
+        settleCopy();
+        await Promise.resolve();
+      });
+
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    },
+  );
 });

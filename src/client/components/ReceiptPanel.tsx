@@ -1,5 +1,5 @@
 import { CheckCheck, Copy, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { ReplayResult } from "../api";
 import { formatTimestamp } from "../formatters";
@@ -22,17 +22,25 @@ export function ReceiptPanel({
   onReplay: () => Promise<void>;
 }) {
   const [copyMessage, setCopyMessage] = useState("");
+  const copyRequest = useRef(0);
+  const activeReceiptId = useRef(receiptId);
+  activeReceiptId.current = receiptId;
 
   useEffect(() => {
+    copyRequest.current += 1;
     setCopyMessage("");
   }, [receiptId]);
 
   async function copyId() {
+    const requestId = ++copyRequest.current;
+    const copiedReceiptId = receiptId;
     try {
       if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
-      await navigator.clipboard.writeText(receiptId);
+      await navigator.clipboard.writeText(copiedReceiptId);
+      if (requestId !== copyRequest.current || activeReceiptId.current !== copiedReceiptId) return;
       setCopyMessage("Receipt ID copied.");
     } catch {
+      if (requestId !== copyRequest.current || activeReceiptId.current !== copiedReceiptId) return;
       setCopyMessage("Clipboard unavailable. Select the receipt ID to copy it.");
     }
   }
