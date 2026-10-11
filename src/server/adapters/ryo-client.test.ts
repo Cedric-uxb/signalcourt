@@ -352,6 +352,20 @@ describe("RYO bounded retries", () => {
     expect(sleepImpl).toHaveBeenCalledWith(1_000);
   });
 
+  it("caps arbitrarily large Retry-After delay-seconds", async () => {
+    const responses = [
+      new Response(null, { status: 503, headers: { "retry-after": "9".repeat(400) } }),
+      jsonResponse(validPayload()),
+    ];
+    const fetchImpl = vi.fn(async () => responses.shift()!);
+    const sleepImpl = vi.fn(async (_ms: number) => {});
+
+    await clientWith(fetchImpl, sleepImpl).call("analyze_token", {});
+
+    expect(sleepImpl).toHaveBeenCalledOnce();
+    expect(sleepImpl).toHaveBeenCalledWith(5_000);
+  });
+
   it.each([
     ["future date above cap", 10_000, 5_000],
     ["future date under cap", 3_000, 3_000],

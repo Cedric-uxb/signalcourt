@@ -85,10 +85,15 @@ function retryDelayMilliseconds(
   const normalized = retryAfter?.trim();
   if (normalized !== undefined) {
     if (/^[0-9]+$/.test(normalized)) {
-      const delaySeconds = Number(normalized);
-      if (Number.isFinite(delaySeconds)) {
-        return Math.min(delaySeconds * 1_000, RETRY_AFTER_CAP_MS);
+      const delaySeconds = normalized.replace(/^0+/, "") || "0";
+      const capSeconds = String(RETRY_AFTER_CAP_MS / 1_000);
+      if (
+        delaySeconds.length > capSeconds.length ||
+        (delaySeconds.length === capSeconds.length && delaySeconds > capSeconds)
+      ) {
+        return RETRY_AFTER_CAP_MS;
       }
+      return Number(delaySeconds) * 1_000;
     }
 
     if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(normalized)) {
