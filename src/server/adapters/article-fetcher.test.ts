@@ -59,6 +59,7 @@ describe("assertPublicHttpUrl", () => {
     "http://100.64.0.1/",
     "http://198.18.0.1/",
     "http://192.0.2.1/",
+    "http://192.88.99.2/",
     "http://224.0.0.1/",
     "http://240.0.0.1/",
     "http://[::]/",
@@ -82,6 +83,12 @@ describe("assertPublicHttpUrl", () => {
     ).rejects.toThrow(/blocked/i);
   });
 
+  it("rejects a domain resolving to the special-purpose anycast address", async () => {
+    await expect(
+      assertPublicHttpUrl("https://news.example/article", lookupReturning("192.88.99.2")),
+    ).rejects.toThrow(/blocked/i);
+  });
+
   it("rejects mixed public and private DNS answers", async () => {
     await expect(
       assertPublicHttpUrl(
@@ -92,7 +99,11 @@ describe("assertPublicHttpUrl", () => {
   });
 
   it("accepts multiple public DNS answers with all and verbatim lookup options", async () => {
-    const lookupImpl = lookupReturning("8.8.8.8", "2001:4860:4860::8888");
+    const lookupImpl = lookupReturning(
+      "8.8.8.8",
+      "192.88.99.1",
+      "2001:4860:4860::8888",
+    );
 
     await expect(assertPublicHttpUrl("https://NEWS.example/story", lookupImpl)).resolves.toEqual(
       new URL("https://news.example/story"),

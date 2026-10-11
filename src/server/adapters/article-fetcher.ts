@@ -18,7 +18,7 @@ function isPublicIpv4(address: string): boolean {
   const octets = parseIpv4(address);
   if (!octets) return false;
 
-  const [a = 0, b = 0, c = 0] = octets;
+  const [a = 0, b = 0, c = 0, d = 0] = octets;
   return !(
     a === 0 ||
     a === 10 ||
@@ -28,6 +28,7 @@ function isPublicIpv4(address: string): boolean {
     (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 0 && c === 0) ||
     (a === 192 && b === 0 && c === 2) ||
+    (a === 192 && b === 88 && c === 99 && d === 2) ||
     (a === 192 && b === 168) ||
     (a === 198 && (b === 18 || b === 19)) ||
     (a === 198 && b === 51 && c === 100) ||
