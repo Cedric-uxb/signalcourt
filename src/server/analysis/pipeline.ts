@@ -539,6 +539,30 @@ function evidenceHashesAreValid(evidence: Evidence[]): boolean {
   return evidence.every(({ hash, ...partial }) => hash === sha256(partial));
 }
 
+function valuesAreUnique(values: readonly string[]): boolean {
+  return new Set(values).size === values.length;
+}
+
+function receiptIdentifiersAreValid(
+  receipt: Pick<Receipt, "evidence" | "claims" | "arguments">,
+): boolean {
+  const evidenceIds = receipt.evidence.map(({ id }) => id);
+  if (!valuesAreUnique(evidenceIds)) return false;
+
+  const claimIds = receipt.claims.map(({ id }) => id);
+  if (!valuesAreUnique(claimIds)) return false;
+
+  const knownEvidenceIds = new Set(evidenceIds);
+  if (receipt.claims.some(({ evidenceIds: claimEvidenceIds }) =>
+    !valuesAreUnique(claimEvidenceIds) ||
+    claimEvidenceIds.some((id) => !knownEvidenceIds.has(id))
+  )) {
+    return false;
+  }
+
+  return receipt.arguments.every(({ citations }) => valuesAreUnique(citations));
+}
+
 function inferEvidenceMode(evidence: Evidence[]): "live" | "simulated" {
   const articleAndNews = evidence.filter(
     ({ kind }) => kind === "article" || kind === "news",
@@ -756,6 +780,9 @@ export function replayReceipt(rawReceipt: unknown): {
 
   const receipt = parsed.data;
   const evidenceHash = sha256(receipt.evidence);
+  if (!receiptIdentifiersAreValid(receipt)) {
+    return { evidenceHash, identical: false };
+  }
   try {
     const modelUnavailable = argumentsAreFallback(receipt.arguments);
     const insufficientEvidence =
@@ -991,6 +1018,13 @@ export function createAnalysisPipeline(deps: AnalysisDependencies) {
 
       if (!evidenceHashesAreValid(evidence)) {
         throw new Error("Evidence integrity check failed");
+      }
+      if (!receiptIdentifiersAreValid({
+        evidence,
+        claims: verification.claims,
+        arguments: debate.arguments,
+      })) {
+        throw new Error("Receipt identifier integrity check failed");
       }
 
       const insufficientEvidence =

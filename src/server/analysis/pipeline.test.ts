@@ -1067,6 +1067,24 @@ it("returns NO_TRADE when either argument contains a missing citation", async ()
   expect(receipt.riskPlan).toBeNull();
 });
 
+it("rejects duplicate argument citations before producing a receipt", async () => {
+  const dependencies = makeDependencies({
+    llm: {
+      ...makeDependencies().llm,
+      argue: vi.fn(async (stance: "bull" | "bear") => argument(
+        stance,
+        stance === "bull" ? 0.8 : 0.4,
+        stance === "bull"
+          ? ["article-1", "article-1"]
+          : ["article-1"],
+      )),
+    },
+  });
+
+  await expect(createAnalysisPipeline(dependencies).run(rawInput))
+    .rejects.toThrow("Receipt identifier integrity check failed");
+});
+
 it("returns NO_TRADE without a risk plan when confidence is tied", async () => {
   const dependencies = makeDependencies({
     llm: {

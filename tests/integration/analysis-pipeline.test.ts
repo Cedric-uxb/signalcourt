@@ -14,6 +14,20 @@ const input = {
   riskLevel: "balanced",
 } as const;
 
+function updateClaimCausalEntry(receipt: Receipt, index: number) {
+  const claim = receipt.claims[index]!;
+  receipt.causalChain[index] = `claim:${claim.id}:${claim.status}:${sha256({
+    text: claim.text,
+    evidenceIds: claim.evidenceIds,
+    explanation: claim.explanation,
+  })}`;
+}
+
+function updateArgumentCausalEntry(receipt: Receipt) {
+  receipt.causalChain[receipt.causalChain.length - 1] =
+    `arguments:${sha256(receipt.arguments)}`;
+}
+
 it("creates a replayable supported simulated decision receipt offline", async () => {
   const receipt = await createAnalysisPipeline(
     createDemoDependencies("supported"),
@@ -107,6 +121,81 @@ it.each(["ryo-1", "ryo-3", "ryo-4"])(
     expect(replayReceipt(tampered).identical).toBe(false);
   },
 );
+
+it("rejects duplicate evidence ids even when the added news is otherwise independent", async () => {
+  const receipt = await createAnalysisPipeline(
+    createDemoDependencies("supported"),
+  ).run(input);
+  const tampered = structuredClone(receipt);
+  const original = tampered.evidence.find(({ id }) => id === "news-1")!;
+  const duplicate = structuredClone(original);
+  duplicate.source = "https://example.net/another-report";
+  const payload = duplicate.payload as {
+    url: string;
+    publisher: { domain: string; id: string };
+  };
+  payload.url = duplicate.source;
+  payload.publisher = { domain: "example.net", id: "another-publisher" };
+  const { hash: _duplicateHash, ...duplicatePartial } = duplicate;
+  duplicate.hash = sha256(duplicatePartial);
+  tampered.evidence.push(duplicate);
+  tampered.replay.evidenceHash = sha256(tampered.evidence);
+
+  expect(receiptSchema.safeParse(tampered).success).toBe(true);
+  expect(replayReceipt(tampered).identical).toBe(false);
+});
+
+it("rejects duplicate claim ids after causal data is recomputed", async () => {
+  const receipt = await createAnalysisPipeline(
+    createDemoDependencies("supported"),
+  ).run(input);
+  const tampered = structuredClone(receipt);
+  tampered.claims.push(structuredClone(tampered.claims[0]!));
+  tampered.causalChain.splice(
+    tampered.causalChain.length - 1,
+    0,
+    tampered.causalChain[0]!,
+  );
+
+  expect(receiptSchema.safeParse(tampered).success).toBe(true);
+  expect(replayReceipt(tampered).identical).toBe(false);
+});
+
+it("rejects a claim evidence reference that does not exist", async () => {
+  const receipt = await createAnalysisPipeline(
+    createDemoDependencies("supported"),
+  ).run(input);
+  const tampered = structuredClone(receipt);
+  tampered.claims[0]!.evidenceIds = ["news-missing"];
+  updateClaimCausalEntry(tampered, 0);
+
+  expect(receiptSchema.safeParse(tampered).success).toBe(true);
+  expect(replayReceipt(tampered).identical).toBe(false);
+});
+
+it("rejects duplicate evidence references within one claim", async () => {
+  const receipt = await createAnalysisPipeline(
+    createDemoDependencies("supported"),
+  ).run(input);
+  const tampered = structuredClone(receipt);
+  tampered.claims[0]!.evidenceIds = ["news-1", "news-1"];
+  updateClaimCausalEntry(tampered, 0);
+
+  expect(receiptSchema.safeParse(tampered).success).toBe(true);
+  expect(replayReceipt(tampered).identical).toBe(false);
+});
+
+it("rejects duplicate citations within one debate argument", async () => {
+  const receipt = await createAnalysisPipeline(
+    createDemoDependencies("supported"),
+  ).run(input);
+  const tampered = structuredClone(receipt);
+  tampered.arguments[0].citations.push(tampered.arguments[0].citations[0]!);
+  updateArgumentCausalEntry(tampered);
+
+  expect(receiptSchema.safeParse(tampered).success).toBe(true);
+  expect(replayReceipt(tampered).identical).toBe(false);
+});
 
 it.each([
   {
