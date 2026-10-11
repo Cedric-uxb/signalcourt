@@ -2147,7 +2147,7 @@ npm install
 npm run dev
 ```
 
-Open `http://127.0.0.1:5173`. Demo mode uses clearly labelled simulated fixtures and requires no API keys.
+Open `http://localhost:5173`. Demo mode uses clearly labelled simulated fixtures and requires no API keys.
 
 ## Run live mode
 
@@ -2185,7 +2185,17 @@ The live smoke test is opt-in because it consumes authenticated RYO quota.
 
 - [ ] **Step 3: 做秘密扫描和完整验证**
 
-Run: `rg -n "ryo_mcp_[A-Za-z0-9_-]+|tvly-[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]+" . --glob '!node_modules/**' --glob '!package-lock.json'`
+Run the bounded scan across every tracked file, including dotfiles and the lockfile:
+
+```bash
+git grep -nI -E '(ryo_mcp_|tvly-)[A-Za-z0-9_-]{16,}|(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}'
+```
+
+Then scan reachable Git history with the same bounded patterns:
+
+```bash
+git log -p --all --no-ext-diff | rg -n '(ryo_mcp_|tvly-)[A-Za-z0-9_-]{16,}|(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}'
+```
 
 Expected: 无匹配。
 

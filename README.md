@@ -99,7 +99,7 @@ npm ci
 npm run dev
 ```
 
-Open [http://127.0.0.1:5173](http://127.0.0.1:5173). The API listens on `127.0.0.1:8787`. With missing or incomplete live configuration, the server deliberately stays in demo mode. The default demo uses a fixed supported scenario, stores receipts in `./data/signalcourt.sqlite`, and makes no paid external calls.
+Open [http://localhost:5173](http://localhost:5173). The API listens on `127.0.0.1:8787`. With missing or incomplete live configuration, the server deliberately stays in demo mode. The default demo uses a fixed supported scenario, stores receipts in `./data/signalcourt.sqlite`, and makes no paid external calls.
 
 ## Live-mode setup
 

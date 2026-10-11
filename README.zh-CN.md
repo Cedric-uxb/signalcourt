@@ -99,7 +99,7 @@ npm ci
 npm run dev
 ```
 
-打开 [http://127.0.0.1:5173](http://127.0.0.1:5173)，API 监听 `127.0.0.1:8787`。只要 live 配置缺失或不完整，服务器就会明确保持 Demo mode。默认 Demo 使用固定的“证据充分”场景，把凭证保存到 `./data/signalcourt.sqlite`，不会产生付费外部调用。
+打开 [http://localhost:5173](http://localhost:5173)，API 监听 `127.0.0.1:8787`。只要 live 配置缺失或不完整，服务器就会明确保持 Demo mode。默认 Demo 使用固定的“证据充分”场景，把凭证保存到 `./data/signalcourt.sqlite`，不会产生付费外部调用。
 
 ## Live mode 配置
 
