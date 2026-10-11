@@ -1,15 +1,22 @@
 import type { Claim, Receipt } from "../../shared/contracts.js";
 import type { ReasonCode } from "../../shared/reason-codes.js";
-import type { RiskPlan, Verdict } from "./risk.js";
+import {
+  buildRiskPlan,
+  type RiskPlan,
+  type RiskProfile,
+  type Verdict,
+} from "./risk.js";
 
 export type DecisionInput = Readonly<{
+  claimStatuses: readonly Claim["status"][];
+  marketEvidenceUsable: boolean;
+  missingCitations: readonly string[];
   proposedVerdict: Verdict;
+  price: number | null;
+  atr: number | null;
+  riskLevel: RiskProfile;
   bullConfidence: number;
   bearConfidence: number;
-  claims: readonly Claim[];
-  marketDataUsable: boolean;
-  missingCitationIds: readonly string[];
-  riskPlan: RiskPlan | null;
 }>;
 
 export type Decision = Pick<
@@ -23,26 +30,46 @@ function assertConfidence(value: number, name: string): void {
   }
 }
 
-function collectReasonCodes(input: DecisionInput): ReasonCode[] {
+function expectedVerdict(
+  bullConfidence: number,
+  bearConfidence: number,
+): Verdict {
+  if (bullConfidence > bearConfidence) return "LONG";
+  if (bearConfidence > bullConfidence) return "SHORT";
+  return "NO_TRADE";
+}
+
+function assertVerdictMatchesConfidence(input: DecisionInput): void {
+  if (
+    input.proposedVerdict !==
+    expectedVerdict(input.bullConfidence, input.bearConfidence)
+  ) {
+    throw new RangeError("proposedVerdict must match bull and bear confidence");
+  }
+}
+
+function collectReasonCodes(
+  input: DecisionInput,
+  riskPlan: RiskPlan | null,
+): ReasonCode[] {
   const reasonCodes: ReasonCode[] = [];
-  const claimStatuses = input.claims.map((claim) => claim.status);
 
   if (
-    claimStatuses.includes("unsupported") ||
-    !claimStatuses.includes("verified")
+    input.claimStatuses.includes("unsupported") ||
+    !input.claimStatuses.includes("verified")
   ) {
     reasonCodes.push("CLAIM_UNSUPPORTED");
   }
-  if (claimStatuses.includes("disputed")) {
+  if (input.claimStatuses.includes("disputed")) {
     reasonCodes.push("CLAIM_DISPUTED");
   }
-  if (!input.marketDataUsable) {
+  if (!input.marketEvidenceUsable) {
     reasonCodes.push("MARKET_DATA_UNAVAILABLE");
   }
-  if (input.missingCitationIds.length > 0) {
+  if (input.missingCitations.length > 0) {
     reasonCodes.push("CITATION_INVALID");
   }
-  if (input.riskPlan === null || input.proposedVerdict === "NO_TRADE") {
+  if (input.proposedVerdict !== "NO_TRADE" && riskPlan === null) {
     reasonCodes.push("RISK_INPUT_INCOMPLETE");
   }
 
@@ -52,9 +79,21 @@ function collectReasonCodes(input: DecisionInput): ReasonCode[] {
 export function decide(input: DecisionInput): Decision {
   assertConfidence(input.bullConfidence, "bullConfidence");
   assertConfidence(input.bearConfidence, "bearConfidence");
+  assertVerdictMatchesConfidence(input);
 
-  const reasonCodes = collectReasonCodes(input);
-  if (reasonCodes.length > 0) {
+  const riskPlan = buildRiskPlan({
+    verdict: input.proposedVerdict,
+    price: input.price,
+    atr: input.atr,
+    riskLevel: input.riskLevel,
+  });
+  const reasonCodes = collectReasonCodes(input, riskPlan);
+
+  if (
+    reasonCodes.length > 0 ||
+    input.proposedVerdict === "NO_TRADE" ||
+    riskPlan === null
+  ) {
     return {
       verdict: "NO_TRADE",
       confidence: 0,
@@ -69,6 +108,6 @@ export function decide(input: DecisionInput): Decision {
       Math.max(input.bullConfidence, input.bearConfidence).toFixed(2),
     ),
     reasonCodes,
-    riskPlan: input.riskPlan,
+    riskPlan,
   };
 }

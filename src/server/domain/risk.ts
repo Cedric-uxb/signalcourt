@@ -44,8 +44,15 @@ export function buildRiskPlan(input: RiskInput): RiskPlan | null {
   const roundedStop = roundReceiptNumber(stop);
   const roundedTarget = roundReceiptNumber(target);
   const roundedValues = [roundedEntry, roundedStop, roundedTarget];
+  const roundedValuesAreValid = roundedValues.every(
+    (value) => Number.isFinite(value) && value > 0,
+  );
+  const directionIsValid =
+    verdict === "LONG"
+      ? roundedStop < roundedEntry && roundedEntry < roundedTarget
+      : roundedTarget < roundedEntry && roundedEntry < roundedStop;
 
-  if (roundedValues.some((value) => !Number.isFinite(value) || value <= 0)) {
+  if (!roundedValuesAreValid || !directionIsValid) {
     return null;
   }
 
