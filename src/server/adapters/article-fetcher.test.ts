@@ -181,6 +181,13 @@ describe("extractArticleText", () => {
 
     expect(extractArticleText(html)).toBe("Visible");
   });
+
+  it.each([
+    ["<p>Price is < $10 today.</p>", "Price is < $10 today."],
+    ["<p>2 < 3 and 5 > 4</p>", "2 < 3 and 5 > 4"],
+  ])("preserves literal less-than text in %s", (html, expected) => {
+    expect(extractArticleText(html)).toBe(expected);
+  });
 });
 
 describe("fetchArticle", () => {

@@ -189,6 +189,21 @@ function isTagNameCharacter(character: string | undefined): boolean {
   );
 }
 
+function isAsciiLetter(character: string | undefined): boolean {
+  if (!character) return false;
+  const code = character.charCodeAt(0);
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+function isMarkupStart(html: string, start: number): boolean {
+  const next = html[start + 1];
+  return (
+    next === "!" ||
+    isAsciiLetter(next) ||
+    (next === "/" && isAsciiLetter(html[start + 2]))
+  );
+}
+
 function findTagEnd(html: string, start: number): number {
   let quote: string | null = null;
   for (let cursor = start; cursor < html.length; cursor += 1) {
@@ -230,7 +245,7 @@ function findSpecialBlockEnd(html: string, tagName: string, start: number): numb
     const tagStart = html.indexOf("<", cursor);
     if (tagStart === -1) return html.length;
 
-    if (html[tagStart + 1] !== "/") {
+    if (html[tagStart + 1] !== "/" || !isAsciiLetter(html[tagStart + 2])) {
       cursor = tagStart + 1;
       continue;
     }
@@ -252,6 +267,10 @@ function collectTextFragments(html: string): string[] {
   while (cursor < html.length) {
     const tagStart = html.indexOf("<", cursor);
     if (tagStart === -1) break;
+    if (!isMarkupStart(html, tagStart)) {
+      cursor = tagStart + 1;
+      continue;
+    }
     if (tagStart > textStart) fragments.push(html.slice(textStart, tagStart));
 
     if (html.startsWith("<!--", tagStart)) {
