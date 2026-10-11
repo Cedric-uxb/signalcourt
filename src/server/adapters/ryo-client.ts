@@ -5,9 +5,19 @@ const MAX_ATTEMPTS = 3;
 const RETRY_AFTER_CAP_MS = 5_000;
 const TOOL_PATTERN = /^[A-Za-z0-9_-]+$/;
 
-const jsonObjectSchema = z.record(z.string(), z.json());
+const jsonValueSchema = z.json();
+const jsonObjectSchema = z.record(z.string(), jsonValueSchema);
+const catalogSchema = z
+  .object({
+    tools: z.array(
+      z
+        .object({ name: z.string().trim().min(1).regex(TOOL_PATTERN) })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
 const resultSchema = z.object({
-  schema_version: z.string().trim().min(1),
+  schema_version: z.literal("1"),
   tool: z.string(),
   status: z.enum(["ok", "partial", "unavailable"]),
   data_mode: z.enum(["live", "mixed", "simulated", "unknown"]),
@@ -28,6 +38,8 @@ class ResponseTooLargeError extends Error {
 
 type Sleep = (milliseconds: number) => Promise<void>;
 type Now = () => number;
+type JsonValue = z.infer<typeof jsonValueSchema>;
+type JsonObject = z.infer<typeof jsonObjectSchema>;
 
 type Options = {
   baseUrl: string;
@@ -75,6 +87,42 @@ async function safeCancelBody(body: CancelableBody | null, reason?: unknown): Pr
   } catch {
     // Cancellation is best-effort and must not replace the primary error.
   }
+}
+
+function jsonDeepEqual(left: JsonValue, right: JsonValue): boolean {
+  if (left === right) return true;
+
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => jsonDeepEqual(value, right[index]!))
+    );
+  }
+
+  if (left === null || right === null || typeof left !== "object" || typeof right !== "object") {
+    return false;
+  }
+
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key) =>
+        Object.prototype.hasOwnProperty.call(right, key) &&
+        jsonDeepEqual(left[key]!, right[key]!),
+    )
+  );
+}
+
+function responseRequestMatches(requested: JsonObject, received: JsonObject): boolean {
+  return Object.keys(requested).every(
+    (key) =>
+      Object.prototype.hasOwnProperty.call(received, key) &&
+      jsonDeepEqual(requested[key]!, received[key]!),
+  );
 }
 
 function retryDelayMilliseconds(
@@ -189,9 +237,12 @@ export function createRyoClient({
       if (!retryable || attempt === MAX_ATTEMPTS - 1) return response;
 
       await safeCancelBody(response.body);
-      await sleepImpl(
-        retryDelayMilliseconds(response.headers.get("retry-after"), attempt, nowImpl),
-      );
+      try {
+        const delay = retryDelayMilliseconds(response.headers.get("retry-after"), attempt, nowImpl);
+        await sleepImpl(delay);
+      } catch {
+        throw new Error("RYO retry scheduling failed");
+      }
     }
 
     throw new Error("RYO request failed");
@@ -212,7 +263,7 @@ export function createRyoClient({
       await requireSuccess(response, "RYO catalog");
 
       const payload = await parseJsonResponse(response);
-      const parsed = jsonObjectSchema.safeParse(payload);
+      const parsed = catalogSchema.safeParse(payload);
       if (!parsed.success) throw new Error("RYO catalog schema is invalid");
       return parsed.data;
     },
@@ -223,11 +274,13 @@ export function createRyoClient({
         throw new Error("RYO tool must be a safe non-empty path segment");
       }
 
+      let requestedArguments: JsonObject;
       let serializedArguments: string;
       try {
         const parsed = jsonObjectSchema.safeParse(arguments_);
         if (!parsed.success) throw new Error();
-        serializedArguments = JSON.stringify(parsed.data);
+        requestedArguments = parsed.data;
+        serializedArguments = JSON.stringify(requestedArguments);
       } catch {
         throw new Error("RYO arguments must be a JSON object");
       }
@@ -247,6 +300,9 @@ export function createRyoClient({
       if (!parsed.success) throw new Error("RYO response schema is invalid");
       if (parsed.data.result.tool !== normalizedTool) {
         throw new Error("RYO response tool mismatch");
+      }
+      if (!responseRequestMatches(requestedArguments, parsed.data.result.request)) {
+        throw new Error("RYO response request mismatch");
       }
 
       const result = parsed.data.result;

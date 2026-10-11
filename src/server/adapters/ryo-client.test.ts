@@ -54,7 +54,7 @@ function jsonResponse(payload: unknown, status = 200, headers?: HeadersInit): Re
   });
 }
 
-function validPayload(tool = "analyze_token") {
+function validPayload(tool = "analyze_token", request: Record<string, unknown> = { symbol: "SOL" }) {
   return {
     result: {
       schema_version: "1",
@@ -62,12 +62,20 @@ function validPayload(tool = "analyze_token") {
       status: "ok",
       data_mode: "live",
       as_of: "2026-10-08T12:00:00.000Z",
-      request: { symbol: "SOL" },
+      request,
       data: { price_usd: 100 },
       summary: { headline: "Current response is valid" },
       availability: { market: "available" },
       warnings: [],
     },
+  };
+}
+
+function errorSnapshot(error: unknown): unknown {
+  if (!(error instanceof Error)) return error;
+  return {
+    message: error.message,
+    cause: error.cause === undefined ? undefined : errorSnapshot(error.cause),
   };
 }
 
@@ -162,6 +170,41 @@ describe("RYO catalog", () => {
     const fetchImpl = vi.fn(async () => jsonResponse(payload));
 
     await expect(clientWith(fetchImpl).catalog()).rejects.toThrow(/catalog schema/i);
+  });
+
+  it.each([
+    ["missing tools", {}],
+    ["error payload", { error: "unavailable" }],
+    ["unsafe tool name", { tools: [{ name: "../admin" }] }],
+  ])("rejects catalog contract violation: %s", async (_name, payload) => {
+    const fetchImpl = vi.fn(async () => jsonResponse(payload));
+
+    await expect(clientWith(fetchImpl).catalog()).rejects.toThrow(/catalog schema/i);
+  });
+
+  it("trims tool names while preserving forward-compatible catalog metadata", async () => {
+    const payload = {
+      tools: [
+        {
+          name: "  analyze_token  ",
+          description: "Analyze a token",
+          input_schema: { type: "object" },
+        },
+      ],
+      catalog_version: "2026-10",
+    };
+    const fetchImpl = vi.fn(async () => jsonResponse(payload));
+
+    await expect(clientWith(fetchImpl).catalog()).resolves.toEqual({
+      tools: [
+        {
+          name: "analyze_token",
+          description: "Analyze a token",
+          input_schema: { type: "object" },
+        },
+      ],
+      catalog_version: "2026-10",
+    });
   });
 
   it("creates a fresh 15-second timeout for every attempt", async () => {
@@ -269,6 +312,42 @@ describe("RYO call normalization", () => {
   });
 
   it.each([
+    ["symbol", { symbol: "SOL" }, { symbol: "BTC" }],
+    ["time window", { time_window: "7d" }, { time_window: "24h" }],
+  ])("rejects a response with mismatched %s request evidence", async (_name, sent, received) => {
+    const fetchImpl = vi.fn(async () => jsonResponse(validPayload("analyze_token", received)));
+
+    await expect(clientWith(fetchImpl).call("analyze_token", sent)).rejects.toThrow(
+      "RYO response request mismatch",
+    );
+  });
+
+  it("accepts equivalent nested request objects with different key order", async () => {
+    const sent = {
+      filters: { chain: "solana", thresholds: { high: 2, low: 1 } },
+      assets: ["SOL", "BTC"],
+    };
+    const received = {
+      assets: ["SOL", "BTC"],
+      filters: { thresholds: { low: 1, high: 2 }, chain: "solana" },
+    };
+    const fetchImpl = vi.fn(async () => jsonResponse(validPayload("analyze_token", received)));
+
+    await expect(clientWith(fetchImpl).call("analyze_token", sent)).resolves.toMatchObject({
+      request: received,
+    });
+  });
+
+  it("accepts response request fields added as server defaults", async () => {
+    const received = { symbol: "SOL", currency: "USD" };
+    const fetchImpl = vi.fn(async () => jsonResponse(validPayload("analyze_token", received)));
+
+    await expect(
+      clientWith(fetchImpl).call("analyze_token", { symbol: "SOL" }),
+    ).resolves.toMatchObject({ request: received });
+  });
+
+  it.each([
     ["top-level", (payload: ReturnType<typeof validPayload>) => Object.assign(payload, { extra: true })],
     ["result", (payload: ReturnType<typeof validPayload>) => Object.assign(payload.result, { extra: true })],
     [
@@ -287,6 +366,7 @@ describe("RYO call normalization", () => {
   });
 
   it.each([
+    ["schema version", { schema_version: "999" }],
     ["status", { status: "success" }],
     ["data mode", { data_mode: "fresh" }],
     ["date", { as_of: "October 8" }],
@@ -470,6 +550,78 @@ describe("RYO bounded retries", () => {
     await expect(clientWith(fetchImpl).call("analyze_token", {})).resolves.toMatchObject({
       tool: "analyze_token",
     });
+    expect(retry.cancelSpy).toHaveBeenCalledOnce();
+  });
+
+  it("sanitizes now hook errors after cancelling the retry body", async () => {
+    const sentinel = "now-hook-key-sentinel";
+    const retry = cancelTrackedStream();
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(retry.stream, {
+          status: 503,
+          headers: { "retry-after": "Sun, 11 Oct 2026 12:00:03 GMT" },
+        }),
+    );
+    const sleepImpl = vi.fn(async (_ms: number) => {});
+    const client = createRyoClient({
+      baseUrl: "https://api.example.test",
+      apiKey: sentinel,
+      fetchImpl,
+      sleepImpl,
+      nowImpl: () => {
+        throw new Error(`clock leaked ${sentinel}`, { cause: { sentinel } });
+      },
+    });
+
+    let rejection: unknown;
+    try {
+      await client.catalog();
+    } catch (error) {
+      rejection = error;
+    }
+
+    expect(errorSnapshot(rejection)).toEqual({
+      message: "RYO retry scheduling failed",
+      cause: undefined,
+    });
+    expect(JSON.stringify(errorSnapshot(rejection))).not.toContain(sentinel);
+    expect(JSON.stringify(rejection)).not.toContain(sentinel);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(retry.cancelSpy).toHaveBeenCalledOnce();
+    expect(sleepImpl).not.toHaveBeenCalled();
+  });
+
+  it("sanitizes sleep hook errors after cancelling the retry body", async () => {
+    const sentinel = "sleep-hook-key-sentinel";
+    const retry = cancelTrackedStream();
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(retry.stream, { status: 429, headers: { "retry-after": "1" } }),
+    );
+    const client = createRyoClient({
+      baseUrl: "https://api.example.test",
+      apiKey: sentinel,
+      fetchImpl,
+      sleepImpl: async () => {
+        throw new Error(`sleep leaked ${sentinel}`, { cause: { sentinel } });
+      },
+    });
+
+    let rejection: unknown;
+    try {
+      await client.catalog();
+    } catch (error) {
+      rejection = error;
+    }
+
+    expect(errorSnapshot(rejection)).toEqual({
+      message: "RYO retry scheduling failed",
+      cause: undefined,
+    });
+    expect(JSON.stringify(errorSnapshot(rejection))).not.toContain(sentinel);
+    expect(JSON.stringify(rejection)).not.toContain(sentinel);
+    expect(fetchImpl).toHaveBeenCalledOnce();
     expect(retry.cancelSpy).toHaveBeenCalledOnce();
   });
 });
