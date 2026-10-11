@@ -195,4 +195,3 @@ Without `RUN_RYO_SMOKE=1`, the smoke file is collected but skipped. With the fla
 - [English design specification](docs/superpowers/specs/2026-10-05-signalcourt-design.md)
 - [中文设计文档](docs/superpowers/specs/2026-10-05-signalcourt-design.zh-CN.md)
 - [TDD implementation plan (中文)](docs/superpowers/plans/2026-10-08-signalcourt-mvp.md)
-

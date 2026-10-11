@@ -195,4 +195,3 @@ npm run test:smoke:ryo
 - [English design specification](docs/superpowers/specs/2026-10-05-signalcourt-design.md)
 - [中文设计文档](docs/superpowers/specs/2026-10-05-signalcourt-design.zh-CN.md)
 - [TDD 实现计划（中文）](docs/superpowers/plans/2026-10-08-signalcourt-mvp.md)
-
