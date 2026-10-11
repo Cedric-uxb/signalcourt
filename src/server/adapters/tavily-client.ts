@@ -1,11 +1,19 @@
 import { z } from "zod";
 
+const MAX_RESPONSE_BYTES = 512 * 1024;
+
+class ResponseTooLargeError extends Error {
+  constructor() {
+    super("Tavily response is too large");
+  }
+}
+
 const tavilyResponseSchema = z.object({
   results: z.array(
     z.object({
       title: z.string().trim().min(1),
       url: z.string().trim().pipe(z.url({ protocol: /^https?$/ })),
-      content: z.string(),
+      content: z.string().trim().min(1),
     }),
   ),
 });
@@ -15,6 +23,51 @@ export type NewsSearchResult = {
   url: string;
   excerpt: string;
 };
+
+type CancelableBody = {
+  cancel(reason?: unknown): Promise<void>;
+};
+
+async function safeCancelBody(body: CancelableBody | null, reason?: unknown): Promise<void> {
+  if (!body) return;
+  try {
+    await body.cancel(reason);
+  } catch {
+    // Cancellation is best-effort and must not replace the primary error.
+  }
+}
+
+async function readLimitedText(response: Response): Promise<string> {
+  const contentLength = response.headers.get("content-length");
+  if (contentLength && /^\d+$/.test(contentLength) && Number(contentLength) > MAX_RESPONSE_BYTES) {
+    await safeCancelBody(response.body, "Tavily response is too large");
+    throw new ResponseTooLargeError();
+  }
+
+  if (!response.body) return "";
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let bytesRead = 0;
+  let text = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      bytesRead += value.byteLength;
+      if (bytesRead > MAX_RESPONSE_BYTES) {
+        await safeCancelBody(reader, "Tavily response is too large");
+        throw new ResponseTooLargeError();
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    return text + decoder.decode();
+  } finally {
+    reader.releaseLock();
+  }
+}
 
 export async function searchNews(
   query: string,
@@ -44,19 +97,31 @@ export async function searchNews(
   }
 
   if (!response.ok) {
+    await safeCancelBody(response.body);
     throw new Error(`Tavily search failed with status ${response.status}`);
   }
 
   const contentType = response.headers.get("content-type") ?? "";
   if (!/^application\/json(?:\s*;|$)/i.test(contentType)) {
+    await safeCancelBody(response.body);
     throw new Error("Tavily response must be JSON");
+  }
+
+  let responseText: string;
+  try {
+    responseText = await readLimitedText(response);
+  } catch (error) {
+    if (error instanceof ResponseTooLargeError) {
+      throw error;
+    }
+    throw new Error("Tavily response read failed");
   }
 
   let payload: unknown;
   try {
-    payload = JSON.parse(await response.text());
-  } catch (error) {
-    throw new Error("Tavily returned invalid JSON", { cause: error });
+    payload = JSON.parse(responseText);
+  } catch {
+    throw new Error("Tavily returned invalid JSON");
   }
 
   const parsed = tavilyResponseSchema.safeParse(payload);

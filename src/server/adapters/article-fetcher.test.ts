@@ -20,6 +20,24 @@ function lookupReturning(...addresses: string[]): DnsLookup {
   );
 }
 
+function cancelTrackedStream(
+  chunks: Uint8Array[] = [],
+  cancelImpl?: () => void | Promise<void>,
+): { stream: ReadableStream<Uint8Array>; cancelSpy: ReturnType<typeof vi.fn> } {
+  const cancelSpy = vi.fn(async (_reason?: unknown) => {
+    await cancelImpl?.();
+  });
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk);
+    },
+    cancel(reason) {
+      return cancelSpy(reason);
+    },
+  });
+  return { stream, cancelSpy };
+}
+
 describe("assertPublicHttpUrl", () => {
   it.each(["file:///etc/passwd", "ftp://example.com/file"])(
     "rejects unsupported protocol in %s",
@@ -59,7 +77,10 @@ describe("assertPublicHttpUrl", () => {
     "http://100.64.0.1/",
     "http://198.18.0.1/",
     "http://192.0.2.1/",
+    "http://192.88.99.0/",
+    "http://192.88.99.1/",
     "http://192.88.99.2/",
+    "http://192.88.99.255/",
     "http://224.0.0.1/",
     "http://240.0.0.1/",
     "http://[::]/",
@@ -83,11 +104,14 @@ describe("assertPublicHttpUrl", () => {
     ).rejects.toThrow(/blocked/i);
   });
 
-  it("rejects a domain resolving to the special-purpose anycast address", async () => {
-    await expect(
-      assertPublicHttpUrl("https://news.example/article", lookupReturning("192.88.99.2")),
-    ).rejects.toThrow(/blocked/i);
-  });
+  it.each(["192.88.99.0", "192.88.99.1", "192.88.99.2", "192.88.99.255"])(
+    "rejects a domain resolving to special-purpose address %s",
+    async (address) => {
+      await expect(
+        assertPublicHttpUrl("https://news.example/article", lookupReturning(address)),
+      ).rejects.toThrow(/blocked/i);
+    },
+  );
 
   it("rejects mixed public and private DNS answers", async () => {
     await expect(
@@ -99,11 +123,7 @@ describe("assertPublicHttpUrl", () => {
   });
 
   it("accepts multiple public DNS answers with all and verbatim lookup options", async () => {
-    const lookupImpl = lookupReturning(
-      "8.8.8.8",
-      "192.88.99.1",
-      "2001:4860:4860::8888",
-    );
+    const lookupImpl = lookupReturning("8.8.8.8", "2001:4860:4860::8888");
 
     await expect(assertPublicHttpUrl("https://NEWS.example/story", lookupImpl)).resolves.toEqual(
       new URL("https://news.example/story"),
@@ -142,6 +162,24 @@ describe("extractArticleText", () => {
 
   it("caps extracted text at 40,000 characters", () => {
     expect(extractArticleText(`<p>${"a".repeat(45_000)}</p>`)).toHaveLength(40_000);
+  });
+
+  it.each([
+    ["unclosed script", "Visible<script>hidden", "Visible"],
+    ["unclosed comment", "Visible<!-- hidden", "Visible"],
+    ["unclosed tag", 'Visible<div title="hidden"', "Visible"],
+  ])("handles %s without leaking malformed markup", (_name, html, expected) => {
+    expect(extractArticleText(html)).toBe(expected);
+  });
+
+  it("consumes a large malformed special block once without exposing its content", () => {
+    expect(extractArticleText(`<script>${"hidden".repeat(100_000)}`)).toBe("");
+  });
+
+  it("keeps readable text after a script containing a less-than operator", () => {
+    const html = "<script>if (a < b) run();</script><p>Visible</p>";
+
+    expect(extractArticleText(html)).toBe("Visible");
   });
 });
 
@@ -197,18 +235,23 @@ describe("fetchArticle", () => {
     ).rejects.toThrow(/302/);
   });
 
-  it("rejects non-success status codes", async () => {
-    const fetchImpl = vi.fn(async () => new Response("missing", { status: 404 }));
+  it("cancels non-success bodies without allowing cancel errors to replace the status", async () => {
+    const { stream, cancelSpy } = cancelTrackedStream([], async () => {
+      throw new Error("cancel failed");
+    });
+    const fetchImpl = vi.fn(async () => new Response(stream, { status: 404 }));
 
     await expect(
       fetchArticle("https://news.example/story", fetchImpl, lookupReturning("8.8.8.8")),
     ).rejects.toThrow(/404/);
+    expect(cancelSpy).toHaveBeenCalledOnce();
   });
 
-  it("rejects non-HTML content", async () => {
+  it("cancels non-HTML response bodies", async () => {
+    const { stream, cancelSpy } = cancelTrackedStream();
     const fetchImpl = vi.fn(
       async () =>
-        new Response("{}", {
+        new Response(stream, {
           status: 200,
           headers: { "content-type": "application/json" },
         }),
@@ -217,13 +260,34 @@ describe("fetchArticle", () => {
     await expect(
       fetchArticle("https://news.example/story", fetchImpl, lookupReturning("8.8.8.8")),
     ).rejects.toThrow(/HTML/i);
+    expect(cancelSpy).toHaveBeenCalledOnce();
+  });
+
+  it("cancels bodies rejected by the Content-Length limit", async () => {
+    const { stream, cancelSpy } = cancelTrackedStream();
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(stream, {
+          status: 200,
+          headers: {
+            "content-type": "text/html",
+            "content-length": String(512 * 1024 + 1),
+          },
+        }),
+    );
+
+    await expect(
+      fetchArticle("https://news.example/story", fetchImpl, lookupReturning("8.8.8.8")),
+    ).rejects.toThrow(/too large/i);
+    expect(cancelSpy).toHaveBeenCalledOnce();
   });
 
   it("rejects a streamed response larger than 512 KiB", async () => {
-    const oversizedBody = new Uint8Array(512 * 1024 + 1).fill(97);
+    const oversizedChunk = new Uint8Array(512 * 1024 + 1).fill(97);
+    const { stream, cancelSpy } = cancelTrackedStream([oversizedChunk]);
     const fetchImpl = vi.fn(
       async () =>
-        new Response(oversizedBody, {
+        new Response(stream, {
           status: 200,
           headers: { "content-type": "text/html" },
         }),
@@ -232,5 +296,23 @@ describe("fetchArticle", () => {
     await expect(
       fetchArticle("https://news.example/story", fetchImpl, lookupReturning("8.8.8.8")),
     ).rejects.toThrow(/too large/i);
+    expect(cancelSpy).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["empty body", "   "],
+    ["script-only body", "<script>ignore()</script>"],
+  ])("rejects an article with no readable text: %s", async (_name, body) => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        }),
+    );
+
+    await expect(
+      fetchArticle("https://news.example/story", fetchImpl, lookupReturning("8.8.8.8")),
+    ).rejects.toThrow("Article contains no readable text");
   });
 });

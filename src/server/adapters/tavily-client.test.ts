@@ -6,6 +6,30 @@ import { searchNews } from "./tavily-client.js";
 
 const fixtureUrl = new URL("../../../tests/fixtures/tavily.json", import.meta.url);
 
+function cancelTrackedStream(
+  chunks: Uint8Array[] = [],
+  closeDelayMs?: number,
+  cancelImpl?: () => void | Promise<void>,
+): { stream: ReadableStream<Uint8Array>; cancelSpy: ReturnType<typeof vi.fn> } {
+  let closeTimer: ReturnType<typeof setTimeout> | undefined;
+  const cancelSpy = vi.fn(async (_reason?: unknown) => {
+    await cancelImpl?.();
+  });
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk);
+      if (closeDelayMs !== undefined) {
+        closeTimer = setTimeout(() => controller.close(), closeDelayMs);
+      }
+    },
+    cancel(reason) {
+      if (closeTimer) clearTimeout(closeTimer);
+      return cancelSpy(reason);
+    },
+  });
+  return { stream, cancelSpy };
+}
+
 describe("searchNews", () => {
   it("posts the trimmed request and normalizes at most five fixture results", async () => {
     const fixture = await readFile(fixtureUrl, "utf8");
@@ -88,34 +112,93 @@ describe("searchNews", () => {
     })).not.toContain(sentinel);
   });
 
-  it("reports non-success status codes", async () => {
-    const fetchImpl = vi.fn(async () => new Response("unavailable", { status: 503 }));
+  it("cancels non-success bodies without allowing cancel errors to replace the status", async () => {
+    const { stream, cancelSpy } = cancelTrackedStream([], undefined, async () => {
+      throw new Error("cancel failed");
+    });
+    const fetchImpl = vi.fn(async () => new Response(stream, { status: 503 }));
 
     await expect(searchNews("bitcoin", "key", fetchImpl)).rejects.toThrow(/503/);
+    expect(cancelSpy).toHaveBeenCalledOnce();
   });
 
-  it("rejects a non-JSON content type", async () => {
+  it("cancels non-JSON response bodies", async () => {
+    const { stream, cancelSpy } = cancelTrackedStream();
     const fetchImpl = vi.fn(
       async () =>
-        new Response("not json", {
+        new Response(stream, {
           status: 200,
           headers: { "content-type": "text/plain" },
         }),
     );
 
     await expect(searchNews("bitcoin", "key", fetchImpl)).rejects.toThrow(/JSON/i);
+    expect(cancelSpy).toHaveBeenCalledOnce();
   });
 
-  it("rejects malformed JSON", async () => {
+  it("sanitizes invalid JSON errors when the response body contains the API key", async () => {
+    const sentinel = "invalid-json-key-sentinel";
     const fetchImpl = vi.fn(
       async () =>
-        new Response("{", {
+        new Response(`{"api_key":"${sentinel}",`, {
           status: 200,
           headers: { "content-type": "application/json" },
         }),
     );
 
-    await expect(searchNews("bitcoin", "key", fetchImpl)).rejects.toThrow(/invalid JSON/i);
+    let rejection: unknown;
+    try {
+      await searchNews("bitcoin", sentinel, fetchImpl);
+    } catch (error) {
+      rejection = error;
+    }
+
+    expect(rejection).toBeInstanceOf(Error);
+    const exposedError = rejection as Error;
+    expect(exposedError.message).toBe("Tavily returned invalid JSON");
+    expect(exposedError.cause).toBeUndefined();
+    expect(JSON.stringify(exposedError)).not.toContain(sentinel);
+    expect(JSON.stringify({
+      message: exposedError.message,
+      cause: exposedError.cause,
+    })).not.toContain(sentinel);
+  });
+
+  it("cancels bodies rejected by the Content-Length limit", async () => {
+    const body = new TextEncoder().encode("{}");
+    const { stream, cancelSpy } = cancelTrackedStream([body], 25);
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(stream, {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            "content-length": String(512 * 1024 + 1),
+          },
+        }),
+    );
+
+    await expect(searchNews("bitcoin", "key", fetchImpl)).rejects.toThrow(
+      "Tavily response is too large",
+    );
+    expect(cancelSpy).toHaveBeenCalledOnce();
+  });
+
+  it("cancels a chunked response exceeding 512 KiB", async () => {
+    const oversizedChunk = new Uint8Array(512 * 1024 + 1).fill(97);
+    const { stream, cancelSpy } = cancelTrackedStream([oversizedChunk], 25);
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(stream, {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+
+    await expect(searchNews("bitcoin", "key", fetchImpl)).rejects.toThrow(
+      "Tavily response is too large",
+    );
+    expect(cancelSpy).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -123,6 +206,7 @@ describe("searchNews", () => {
     { results: [{ title: "Title", url: "   ", content: "empty URL" }] },
     { results: [{ title: "Title", url: "file:///tmp/result", content: "bad URL" }] },
     { results: [{ title: "Title", url: "https://example.com", content: 42 }] },
+    { results: [{ title: "Title", url: "https://example.com", content: "   " }] },
     { results: "not-an-array" },
   ])("rejects malformed response schema %#", async (payload) => {
     const fetchImpl = vi.fn(

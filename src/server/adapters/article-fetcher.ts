@@ -18,7 +18,7 @@ function isPublicIpv4(address: string): boolean {
   const octets = parseIpv4(address);
   if (!octets) return false;
 
-  const [a = 0, b = 0, c = 0, d = 0] = octets;
+  const [a = 0, b = 0, c = 0] = octets;
   return !(
     a === 0 ||
     a === 10 ||
@@ -28,7 +28,7 @@ function isPublicIpv4(address: string): boolean {
     (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 0 && c === 0) ||
     (a === 192 && b === 0 && c === 2) ||
-    (a === 192 && b === 88 && c === 99 && d === 2) ||
+    (a === 192 && b === 88 && c === 99) ||
     (a === 192 && b === 168) ||
     (a === 198 && (b === 18 || b === 19)) ||
     (a === 198 && b === 51 && c === 100) ||
@@ -167,21 +167,133 @@ function decodeHtmlEntities(text: string): string {
   );
 }
 
+function isHtmlWhitespace(character: string | undefined): boolean {
+  return (
+    character === " " ||
+    character === "\t" ||
+    character === "\n" ||
+    character === "\r" ||
+    character === "\f"
+  );
+}
+
+function isTagNameCharacter(character: string | undefined): boolean {
+  if (!character) return false;
+  const code = character.charCodeAt(0);
+  return (
+    (code >= 48 && code <= 57) ||
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122) ||
+    character === "-" ||
+    character === ":"
+  );
+}
+
+function findTagEnd(html: string, start: number): number {
+  let quote: string | null = null;
+  for (let cursor = start; cursor < html.length; cursor += 1) {
+    const character = html[cursor];
+    if (quote) {
+      if (character === quote) quote = null;
+    } else if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === ">") {
+      return cursor + 1;
+    }
+  }
+  return html.length;
+}
+
+function readTag(html: string, start: number): {
+  closing: boolean;
+  end: number;
+  name: string;
+} {
+  let cursor = start + 1;
+  const closing = html[cursor] === "/";
+  if (closing) cursor += 1;
+  while (isHtmlWhitespace(html[cursor])) cursor += 1;
+
+  const nameStart = cursor;
+  while (isTagNameCharacter(html[cursor])) cursor += 1;
+  return {
+    closing,
+    end: findTagEnd(html, cursor),
+    name: html.slice(nameStart, cursor).toLowerCase(),
+  };
+}
+
+function findSpecialBlockEnd(html: string, tagName: string, start: number): number {
+  let cursor = start;
+
+  while (cursor < html.length) {
+    const tagStart = html.indexOf("<", cursor);
+    if (tagStart === -1) return html.length;
+
+    if (html[tagStart + 1] !== "/") {
+      cursor = tagStart + 1;
+      continue;
+    }
+
+    const tag = readTag(html, tagStart);
+    if (tag.closing && tag.name === tagName) return tag.end;
+    cursor = tag.end;
+  }
+
+  return html.length;
+}
+
+function collectTextFragments(html: string): string[] {
+  const specialTags = new Set(["script", "style", "noscript", "template"]);
+  const fragments: string[] = [];
+  let cursor = 0;
+  let textStart = 0;
+
+  while (cursor < html.length) {
+    const tagStart = html.indexOf("<", cursor);
+    if (tagStart === -1) break;
+    if (tagStart > textStart) fragments.push(html.slice(textStart, tagStart));
+
+    if (html.startsWith("<!--", tagStart)) {
+      const commentEnd = html.indexOf("-->", tagStart + 4);
+      cursor = commentEnd === -1 ? html.length : commentEnd + 3;
+    } else {
+      const tag = readTag(html, tagStart);
+      cursor = !tag.closing && specialTags.has(tag.name)
+        ? findSpecialBlockEnd(html, tag.name, tag.end)
+        : tag.end;
+    }
+    textStart = cursor;
+  }
+
+  if (textStart < html.length) fragments.push(html.slice(textStart));
+  return fragments;
+}
+
 export function extractArticleText(html: string): string {
-  return decodeHtmlEntities(
-    html
-      .replace(/<(script|style|noscript|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
-      .replace(/<!--([\s\S]*?)-->/g, " ")
-      .replace(/<[^>]+>/g, " "),
-  )
+  return decodeHtmlEntities(collectTextFragments(html).join(" "))
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, MAX_ARTICLE_CHARACTERS);
 }
 
+type CancelableBody = {
+  cancel(reason?: unknown): Promise<void>;
+};
+
+async function safeCancelBody(body: CancelableBody | null, reason?: unknown): Promise<void> {
+  if (!body) return;
+  try {
+    await body.cancel(reason);
+  } catch {
+    // Cancellation is best-effort and must not replace the primary error.
+  }
+}
+
 async function readLimitedText(response: Response): Promise<string> {
   const contentLength = response.headers.get("content-length");
   if (contentLength && /^\d+$/.test(contentLength) && Number(contentLength) > MAX_RESPONSE_BYTES) {
+    await safeCancelBody(response.body, "Article response is too large");
     throw new Error("Article response is too large");
   }
 
@@ -199,7 +311,7 @@ async function readLimitedText(response: Response): Promise<string> {
 
       bytesRead += value.byteLength;
       if (bytesRead > MAX_RESPONSE_BYTES) {
-        await reader.cancel("Article response is too large");
+        await safeCancelBody(reader, "Article response is too large");
         throw new Error("Article response is too large");
       }
       text += decoder.decode(value, { stream: true });
@@ -223,16 +335,21 @@ export async function fetchArticle(
     signal: AbortSignal.timeout(10_000),
   });
   if (!response.ok) {
+    await safeCancelBody(response.body);
     throw new Error(`Article fetch failed with status ${response.status}`);
   }
 
   const contentType = response.headers.get("content-type") ?? "";
   if (!/^text\/html(?:\s*;|$)/i.test(contentType)) {
+    await safeCancelBody(response.body);
     throw new Error("Article response must be HTML");
   }
 
+  const text = extractArticleText(await readLimitedText(response));
+  if (!text.trim()) throw new Error("Article contains no readable text");
+
   return {
     url: url.toString(),
-    text: extractArticleText(await readLimitedText(response)),
+    text,
   };
 }
