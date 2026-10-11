@@ -39,7 +39,7 @@ describe("assertPublicHttpUrl", () => {
     );
   });
 
-  it.each(["http://localhost/admin", "http://LOCALHOST./admin"])(
+  it.each(["http://localhost/admin", "http://API.LOCALHOST/admin"])(
     "rejects normalized localhost hostname %s",
     async (rawUrl) => {
       const lookupImpl = lookupReturning("8.8.8.8");
@@ -68,6 +68,7 @@ describe("assertPublicHttpUrl", () => {
     "http://[2001:db8::1]/",
     "http://[ff02::1]/",
     "http://[::ffff:192.168.1.1]/",
+    "http://[::ffff:8.8.8.8]/",
   ])("rejects non-public IP literal %s", async (rawUrl) => {
     const lookupImpl = lookupReturning("8.8.8.8");
 
@@ -93,8 +94,8 @@ describe("assertPublicHttpUrl", () => {
   it("accepts multiple public DNS answers with all and verbatim lookup options", async () => {
     const lookupImpl = lookupReturning("8.8.8.8", "2001:4860:4860::8888");
 
-    await expect(assertPublicHttpUrl("https://NEWS.example./story", lookupImpl)).resolves.toEqual(
-      new URL("https://news.example./story"),
+    await expect(assertPublicHttpUrl("https://NEWS.example/story", lookupImpl)).resolves.toEqual(
+      new URL("https://news.example/story"),
     );
     expect(lookupImpl).toHaveBeenCalledWith("news.example", {
       all: true,
@@ -134,6 +135,17 @@ describe("extractArticleText", () => {
 });
 
 describe("fetchArticle", () => {
+  it("rejects a trailing-dot hostname before DNS lookup or fetch", async () => {
+    const lookupImpl = lookupReturning("8.8.8.8");
+    const fetchImpl = vi.fn();
+
+    await expect(
+      fetchArticle("https://example.com./story", fetchImpl, lookupImpl),
+    ).rejects.toThrow(/trailing dot/i);
+    expect(lookupImpl).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("uses redirect error mode, a timeout signal, and returns extracted HTML text", async () => {
     const fetchImpl = vi.fn(
       async (_input: string | URL | Request, _init?: RequestInit) =>

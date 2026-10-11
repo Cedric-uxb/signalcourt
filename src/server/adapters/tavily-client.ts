@@ -26,17 +26,22 @@ export async function searchNews(
   if (!normalizedQuery) throw new Error("Tavily query must not be empty");
   if (!normalizedApiKey) throw new Error("Tavily API key must not be empty");
 
-  const response = await fetchImpl("https://api.tavily.com/search", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      api_key: normalizedApiKey,
-      query: normalizedQuery,
-      topic: "news",
-      max_results: 5,
-    }),
-    signal: AbortSignal.timeout(15_000),
-  });
+  let response: Response;
+  try {
+    response = await fetchImpl("https://api.tavily.com/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        api_key: normalizedApiKey,
+        query: normalizedQuery,
+        topic: "news",
+        max_results: 5,
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch {
+    throw new Error("Tavily request failed");
+  }
 
   if (!response.ok) {
     throw new Error(`Tavily search failed with status ${response.status}`);

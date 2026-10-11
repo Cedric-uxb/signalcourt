@@ -64,11 +64,9 @@ function isPublicIpv6(address: string): boolean {
   const words = expandIpv6(address);
   if (!words) return false;
 
-  const [a = 0, b = 0, c = 0, d = 0, e = 0, f = 0, g = 0, h = 0] = words;
+  const [a = 0, b = 0, c = 0, d = 0, e = 0, f = 0] = words;
   const isIpv4Mapped = a === 0 && b === 0 && c === 0 && d === 0 && e === 0 && f === 0xffff;
-  if (isIpv4Mapped) {
-    return isPublicIpv4(`${g >> 8}.${g & 0xff}.${h >> 8}.${h & 0xff}`);
-  }
+  if (isIpv4Mapped) return false;
 
   const isGlobalUnicast = (a & 0xe000) === 0x2000;
   const isIetfSpecial = a === 0x2001 && b <= 0x01ff;
@@ -110,6 +108,9 @@ export async function assertPublicHttpUrl(
   }
   if (url.username || url.password) {
     throw new Error("Article URLs must not contain credentials");
+  }
+  if (url.hostname.endsWith(".")) {
+    throw new Error("Article URL hostname must not have a trailing dot");
   }
 
   const hostname = normalizedHostname(url.hostname);

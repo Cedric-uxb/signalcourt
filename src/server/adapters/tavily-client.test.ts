@@ -59,6 +59,35 @@ describe("searchNews", () => {
     await expect(searchNews("", sentinel, vi.fn())).rejects.not.toThrow(sentinel);
   });
 
+  it("sanitizes transport errors that contain the API key and request body", async () => {
+    const sentinel = "transport-key-sentinel";
+    const fetchImpl = vi.fn(
+      async (_input: string | URL | Request, init?: RequestInit) => {
+        const serializedBody = String(init?.body);
+        throw new Error(`transport leaked ${sentinel} ${serializedBody}`, {
+          cause: { sentinel, serializedBody },
+        });
+      },
+    );
+
+    let rejection: unknown;
+    try {
+      await searchNews("bitcoin", sentinel, fetchImpl);
+    } catch (error) {
+      rejection = error;
+    }
+
+    expect(rejection).toBeInstanceOf(Error);
+    const exposedError = rejection as Error;
+    expect(exposedError.message).toBe("Tavily request failed");
+    expect(exposedError.cause).toBeUndefined();
+    expect(JSON.stringify(exposedError)).not.toContain(sentinel);
+    expect(JSON.stringify({
+      message: exposedError.message,
+      cause: exposedError.cause,
+    })).not.toContain(sentinel);
+  });
+
   it("reports non-success status codes", async () => {
     const fetchImpl = vi.fn(async () => new Response("unavailable", { status: 503 }));
 
