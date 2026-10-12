@@ -1,0 +1,34 @@
+{
+  "results": [
+    {
+      "title": "  Exchange confirms listing  ",
+      "url": "https://news.example.com/listing",
+      "content": "  The exchange confirmed the listing.  "
+    },
+    {
+      "title": "Regulator publishes notice",
+      "url": "https://regulator.example.org/notice",
+      "content": "A public notice was published."
+    },
+    {
+      "title": "Issuer updates filing",
+      "url": "http://issuer.example.net/filing",
+      "content": "The filing has been updated."
+    },
+    {
+      "title": "Market volume rises",
+      "url": "https://markets.example.com/volume",
+      "content": "Trading volume increased."
+    },
+    {
+      "title": "Custodian confirms support",
+      "url": "https://custodian.example.com/support",
+      "content": "Custody support is available."
+    },
+    {
+      "title": "Sixth result is truncated",
+      "url": "https://extra.example.com/result",
+      "content": "This result must not be returned."
+    }
+  ]
+}

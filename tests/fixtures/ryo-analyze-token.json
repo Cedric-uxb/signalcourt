@@ -1,0 +1,29 @@
+{
+  "result": {
+    "schema_version": "1",
+    "tool": "analyze_token",
+    "status": "ok",
+    "data_mode": "mixed",
+    "as_of": "2026-10-08T12:00:00.000Z",
+    "request": {
+      "symbol": "SOL"
+    },
+    "data": {
+      "market": {
+        "price_usd": 100
+      },
+      "technicals": {
+        "atr_14": 5,
+        "rsi_14": 54
+      }
+    },
+    "summary": {
+      "headline": "Demo token momentum is balanced"
+    },
+    "availability": {
+      "market": "available",
+      "technicals": "available"
+    },
+    "warnings": []
+  }
+}
